@@ -69,13 +69,14 @@ func init() {
 	})
 }
 
-// Default EPick dimensions in mm (from manual Table 6-4, section 6.1).
-// These are for the 4-cup configuration. Override via frame geometry in config.
+// Default EPick collision geometry dimensions in mm.
+// Intentionally undersized vs the physical gripper so the motion planner
+// allows the suction cups to reach the workpiece surface.
+// Physical widest point is 210x130mm, TCP at Z=196mm.
 const (
-	defaultTCPZmm     = 196.0 // Flange to suction cup tip (4 cups)
-	defaultBodyWidthX  = 160.0 // 4-cup bracket width
-	defaultBodyWidthY  = 82.0  // 4-cup bracket depth
-	defaultBodyHeightZ = 196.0 // Total height from flange to cup tips
+	collisionX = 230.0 // 210mm widest + 20mm padding
+	collisionY = 150.0 // 130mm widest + 20mm padding
+	collisionZ = 170.0 // 150mm body height + 20mm top padding (stops before cup tips)
 )
 
 type epickGripper struct {
@@ -119,11 +120,9 @@ func newEPickGripper(
 		opMgr:  operation.NewSingleOperationManager(),
 	}
 
-	// Build default geometries for the EPick.
-	// The arm's tool frame has +Z pointing away from the flange (toward the workpiece).
-	// We model two parts:
-	//   1. Gripper body: capsule ~75mm diameter, 101mm tall, centered at Z=50.5mm
-	//   2. Bracket + cups: box 160x82x95mm, centered at Z=148.5mm (from 101 to 196)
+	// Build default collision geometry for the EPick.
+	// Single box covering the gripper body, centered at half the collision height.
+	// Stops short of the suction cup tips so the planner can approach surfaces.
 	g.geometries = buildDefaultGeometries(g.Name().ShortName())
 
 	// Override with frame geometry from config if provided.
@@ -435,34 +434,19 @@ func (g *epickGripper) Close(ctx context.Context) error {
 // --- Wait helpers ---
 
 // buildDefaultGeometries creates the EPick's collision geometry.
-// Modeled as two parts along +Z from the flange:
-//   - Body: capsule (cylinder-like), 75mm diameter, 101mm tall, from Z=0 to Z=101
-//   - Bracket + cups: box 160x82x95mm, from Z=101 to Z=196
+// Single box along +Z from the flange, undersized so the planner
+// allows the suction cups to reach the workpiece.
 func buildDefaultGeometries(label string) []spatialmath.Geometry {
-	var geoms []spatialmath.Geometry
-
-	// Gripper body: capsule centered at Z=50.5mm (midpoint of 0..101)
-	body, err := spatialmath.NewCapsule(
-		spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: 50.5}),
-		37.5, // radius = 75mm / 2
-		101,  // length
-		label+"-body",
+	// Box centered at half the collision height along +Z.
+	geom, err := spatialmath.NewBox(
+		spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: collisionZ / 2}),
+		r3.Vector{X: collisionX, Y: collisionY, Z: collisionZ},
+		label,
 	)
-	if err == nil {
-		geoms = append(geoms, body)
+	if err != nil {
+		return nil
 	}
-
-	// Bracket + suction cups: box centered at Z=148.5mm (midpoint of 101..196)
-	bracket, err := spatialmath.NewBox(
-		spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: 148.5}),
-		r3.Vector{X: 160, Y: 82, Z: 95},
-		label+"-bracket",
-	)
-	if err == nil {
-		geoms = append(geoms, bracket)
-	}
-
-	return geoms
+	return []spatialmath.Geometry{geom}
 }
 
 func (g *epickGripper) waitForObject(ctx context.Context, target int, timeout time.Duration) error {
