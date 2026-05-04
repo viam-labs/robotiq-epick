@@ -25,7 +25,7 @@ import (
 )
 
 // Model is the Viam model for the Robotiq EPick vacuum gripper.
-var Model = resource.NewModel("viam-labs", "robotiq", "epick")
+var Model = resource.NewModel("shrews-testing", "robotiq", "epick")
 
 const defaultPort = 63352
 
