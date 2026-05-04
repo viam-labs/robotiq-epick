@@ -1,0 +1,138 @@
+# Robotiq EPick Vacuum Gripper Module
+
+This [Viam module](https://docs.viam.com/) provides a driver for the [Robotiq EPick](https://robotiq.com/products/epick-vacuum-gripper) vacuum gripper connected to a Universal Robots arm.
+
+## Prerequisites
+
+- Robotiq EPick vacuum gripper connected to the UR arm's tool connector
+- **Robotiq URCap installed** on the UR teach pendant (provides the socket server on port 63352)
+- The UR controller must be reachable over the network from the machine running viam-server
+
+### Installing the Robotiq URCap
+
+1. On the UR teach pendant, tap **Installation** > **URCaps**
+2. Install the Robotiq Vacuum URCap (available from [robotiq.com/support](https://robotiq.com/support))
+3. Tap **Vacuum** > **Dashboard** > **Scan** to detect the EPick
+4. Verify by checking that port 63352 is accessible: `nc -zv <UR_IP> 63352`
+
+## Configure your EPick gripper
+
+Navigate to the [**CONFIGURE** tab](https://docs.viam.com/configure/) of your machine in the Viam app. Add a component with type `gripper` and model `viam-labs:robotiq:epick`.
+
+### Automatic mode (default)
+
+The gripper automatically detects vacuum levels, timeout, and hysteresis. Best for quick setup.
+
+```json
+{
+  "name": "epick",
+  "model": "viam-labs:robotiq:epick",
+  "type": "gripper",
+  "namespace": "rdk",
+  "attributes": {
+    "host": "10.1.0.84"
+  },
+  "depends_on": []
+}
+```
+
+### Advanced mode
+
+User sets desired vacuum levels and timeout. Best for consistent production behavior.
+
+```json
+{
+  "name": "epick",
+  "model": "viam-labs:robotiq:epick",
+  "type": "gripper",
+  "namespace": "rdk",
+  "attributes": {
+    "host": "10.1.0.84",
+    "mode": "advanced",
+    "max_pressure_pct": 60,
+    "min_pressure_pct": 40,
+    "timeout_ms": 3000
+  },
+  "depends_on": []
+}
+```
+
+### Attributes
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `host` | string | **Yes** | - | UR controller IP address |
+| `port` | int | No | `63352` | URCap socket port |
+| `mode` | string | No | `"automatic"` | `"automatic"` or `"advanced"` |
+| `max_pressure_pct` | int | No | `60` | Maximum vacuum level (20-100%), advanced mode |
+| `min_pressure_pct` | int | No | `40` | Minimum vacuum level (10-100%), advanced mode |
+| `timeout_ms` | int | No | `3000` | Grip timeout in ms, advanced mode |
+
+## API
+
+Implements the standard [Viam gripper API](https://docs.viam.com/dev/reference/apis/components/gripper/):
+
+| Method | EPick Behavior |
+|--------|---------------|
+| `Open` | Releases vacuum (opens release valve) |
+| `Grab` | Activates vacuum, returns `true` if object detected |
+| `IsHoldingSomething` | Checks suction status with pressure metadata |
+| `Stop` | Stops vacuum regulation |
+| `IsMoving` | Returns `true` if an operation is in progress |
+
+### DoCommand
+
+**Get full gripper status:**
+```json
+{"get_status": true}
+```
+Returns: `object_detected`, `object_status_raw`, `pressure_register`, `pressure_kpa`, `fault_code`, `activation_status`, `mode`.
+
+**Read a raw register:**
+```json
+{"get": "OBJ"}
+```
+Available registers: `ACT`, `MOD`, `GTO`, `STA`, `OBJ`, `FLT`, `POS`, `SPE`, `FOR`.
+
+**Write raw registers:**
+```json
+{"set": {"MOD": "1", "POS": "22", "GTO": "1"}}
+```
+
+## Communication Protocol
+
+This module uses the same socket-based text protocol as the [viam-modules/robotiq](https://github.com/viam-modules/robotiq) 2F gripper module. The Robotiq URCap exposes a TCP socket on port 63352 that accepts commands in the format:
+
+```
+SET <register> <value>\r\n  →  "ack"
+GET <register>\r\n          →  "<register> <value>"
+```
+
+### EPick register mapping
+
+| Register | SET (output) | GET (input) | Description |
+|----------|-------------|-------------|-------------|
+| `ACT` | Activate (0/1) | Activation echo | Gripper activation |
+| `MOD` | Mode (0=auto, 1=advanced) | Mode echo | Operating mode |
+| `GTO` | Regulate (0/1) | Regulate echo | Enable vacuum regulation |
+| `POS` | Pressure request (0-255) | Actual pressure | 0-99=grip, 100+=release |
+| `SPE` | Grip timeout (0-255) | - | Each unit = 100ms |
+| `FOR` | Min pressure (0-255) | - | Minimum vacuum threshold |
+| `OBJ` | - | Object status (0-3) | 0=regulating, 1=min, 2=max, 3=none |
+| `STA` | - | Activation status | 0=not activated, 3=operational |
+| `FLT` | - | Fault code | 0=none, see manual for codes |
+
+## Building
+
+```bash
+make build    # Build binary
+make module   # Build module archive (bin/module.tar.gz)
+make test     # Run tests
+make lint     # Run linter
+```
+
+## References
+
+- [Robotiq EPick Instruction Manual (e-Series)](https://assets.robotiq.com/website-assets/support_documents/document/EPick_Instruction_Manual_e-Series_PDF_20210709.pdf)
+- [Viam Gripper Component Docs](https://docs.viam.com/dev/reference/apis/components/gripper/)
+- [viam-modules/robotiq](https://github.com/viam-modules/robotiq) (2F gripper reference implementation)
