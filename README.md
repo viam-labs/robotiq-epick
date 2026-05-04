@@ -5,28 +5,53 @@ This [Viam module](https://docs.viam.com/) provides a driver for the [Robotiq EP
 ## Prerequisites
 
 - Robotiq EPick vacuum gripper connected to the UR arm's tool connector
-- **Robotiq URCap installed** on the UR teach pendant (provides the socket server on port 63352)
+- **Robotiq Grippers URCap installed** on the UR teach pendant (provides the socket server on port 63352)
 - The UR controller must be reachable over the network from the machine running viam-server
+- Port 63352 must not be blocked by the UR's firewall (see Troubleshooting)
 
 ### Installing the Robotiq URCap
 
-1. On the UR teach pendant, tap **Installation** > **URCaps**
-2. Install the Robotiq Vacuum URCap (available from [robotiq.com/support](https://robotiq.com/support))
-3. Tap **Vacuum** > **Dashboard** > **Scan** to detect the EPick
-4. Verify by checking that port 63352 is accessible: `nc -zv <UR_IP> 63352`
+1. Download the Robotiq Grippers URCap from [robotiq.com/support](https://robotiq.com/support)
+2. Copy the `.urcap` file to a USB drive
+3. On the UR teach pendant, switch to **Local** control mode
+4. Tap **hamburger menu** (☰) > **Settings** > **System** > **URCaps**
+5. Tap **+**, navigate to the USB drive, select the `.urcap` file
+6. Restart when prompted
+7. After restart: **Installation** > **URCaps** > **Vacuum** > **Dashboard** > **Scan** to detect the EPick
+8. Switch back to **Remote** control mode for Viam
+
+### UR Firewall Configuration
+
+The Robotiq URCap socket (port 63352) listens on `127.0.0.1` by default. The UR's security settings may also block external access. To fix:
+
+1. On the pendant: **Settings** > **Security**
+2. Ensure port 63352 is **not** in the "disable inbound access" port range
+3. Verify from the viam-server machine: `nc -zv <UR_IP> 63352`
 
 ## Configure your EPick gripper
 
-Navigate to the [**CONFIGURE** tab](https://docs.viam.com/configure/) of your machine in the Viam app. Add a component with type `gripper` and model `viam-labs:robotiq:epick`.
+Navigate to the [**CONFIGURE** tab](https://docs.viam.com/configure/) of your machine in the Viam app.
+
+Add the **module** (or search for `robotiq-epick` in the registry):
+```json
+{
+  "type": "registry",
+  "name": "shrews-testing_robotiq-epick",
+  "module_id": "shrews-testing:robotiq-epick",
+  "version": "latest"
+}
+```
+
+Add the **gripper component**:
 
 ### Automatic mode (default)
 
-The gripper automatically detects vacuum levels, timeout, and hysteresis. Best for quick setup.
+The gripper automatically detects vacuum levels, timeout, and hysteresis. It will grip for ~2 seconds and then hold indefinitely once an object is detected.
 
 ```json
 {
   "name": "epick",
-  "model": "viam-labs:robotiq:epick",
+  "model": "shrews-testing:robotiq:epick",
   "type": "gripper",
   "namespace": "rdk",
   "attributes": {
@@ -43,7 +68,7 @@ User sets desired vacuum levels and timeout. Best for consistent production beha
 ```json
 {
   "name": "epick",
-  "model": "viam-labs:robotiq:epick",
+  "model": "shrews-testing:robotiq:epick",
   "type": "gripper",
   "namespace": "rdk",
   "attributes": {
@@ -79,6 +104,10 @@ Implements the standard [Viam gripper API](https://docs.viam.com/dev/reference/a
 | `IsHoldingSomething` | Checks suction status with pressure metadata |
 | `Stop` | Stops vacuum regulation |
 | `IsMoving` | Returns `true` if an operation is in progress |
+
+### Automatic mode behavior
+
+In automatic mode, `Grab` activates the vacuum generator for ~2 seconds. If an object is detected (sufficient vacuum reached), the EPick switches to **holding mode** and maintains vacuum indefinitely until `Open` is called. If no object is detected within the timeout, it stops and reports `success: false`.
 
 ### DoCommand
 
@@ -121,6 +150,20 @@ GET <register>\r\n          →  "<register> <value>"
 | `OBJ` | - | Object status (0-3) | 0=regulating, 1=min, 2=max, 3=none |
 | `STA` | - | Activation status | 0=not activated, 3=operational |
 | `FLT` | - | Fault code | 0=none, see manual for codes |
+
+## Troubleshooting
+
+### Module connects but times out
+Port 63352 may be blocked by the UR's security settings. Check **Settings** > **Security** on the pendant and ensure port 63352 is not in the blocked range.
+
+### "model not registered" error
+Ensure both the module AND the gripper component are in the config. The module must be added separately from the component.
+
+### Grab returns false but object is held
+In automatic mode, the EPick's initial grip phase is ~2 seconds. Ensure the object is already in contact with the suction cup when `Grab` is called.
+
+### Fault code 6 after grab
+This is "grip timeout" — the EPick tried to grip but couldn't detect an object within the timeout. The object may not have been sealed against the cup, or there's an air leak.
 
 ## Building
 
