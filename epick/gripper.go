@@ -367,9 +367,46 @@ func (g *epickGripper) Geometries(ctx context.Context, extra map[string]interfac
 	return g.geometries, nil
 }
 
-// Kinematics returns the kinematic model (not applicable for vacuum gripper).
+// Kinematics returns a zero-DOF kinematic model with collision geometries
+// and a TCP endpoint at the suction cup tips (196mm from the flange).
 func (g *epickGripper) Kinematics(ctx context.Context) (referenceframe.Model, error) {
-	return nil, nil
+	name := g.Name().ShortName()
+	cfg := &referenceframe.ModelConfigJSON{
+		Name:  name,
+		Links: []referenceframe.LinkConfig{},
+	}
+
+	parent := referenceframe.World
+
+	// Add collision geometry links.
+	for _, geom := range g.geometries {
+		f, err := referenceframe.NewStaticFrameWithGeometry(geom.Label(), spatialmath.NewZeroPose(), geom)
+		if err != nil {
+			return nil, err
+		}
+		lf, err := referenceframe.NewLinkConfig(f)
+		if err != nil {
+			return nil, err
+		}
+		lf.Parent = parent
+		parent = geom.Label()
+		cfg.Links = append(cfg.Links, *lf)
+	}
+
+	// Add TCP endpoint at the suction cup tips.
+	tcpPose := spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: tcpOffsetZ})
+	tcpFrame, err := referenceframe.NewStaticFrame(name+"-tcp", tcpPose)
+	if err != nil {
+		return nil, err
+	}
+	tcpLink, err := referenceframe.NewLinkConfig(tcpFrame)
+	if err != nil {
+		return nil, err
+	}
+	tcpLink.Parent = parent
+	cfg.Links = append(cfg.Links, *tcpLink)
+
+	return cfg.ParseConfig(name)
 }
 
 // CurrentInputs returns current joint positions (not applicable for vacuum gripper).
@@ -433,10 +470,15 @@ func (g *epickGripper) Close(ctx context.Context) error {
 
 // --- Wait helpers ---
 
+// TCP offset from the flange to the suction cup tips (mm).
+const tcpOffsetZ = 196.0
+
 // buildDefaultGeometries creates the EPick's collision geometry.
-// Two parts along +Z from the flange:
-//   - Cylinder (capsule): 70mm tall from flange, covers the EPick body
-//   - Box: remaining 100mm, covers the bracket, hoses, and suction cups
+// Geometries are positioned relative to the flange (Z=0 at flange, +Z toward workpiece).
+// Two parts:
+//   - Capsule: EPick body, from Z=0 to Z=70
+//   - Box: bracket/hoses/cups, from Z=70 to Z=170
+// The last 26mm to the cup tips (Z=170..196) is left clear for approach.
 func buildDefaultGeometries(label string) []spatialmath.Geometry {
 	var geoms []spatialmath.Geometry
 
@@ -444,11 +486,9 @@ func buildDefaultGeometries(label string) []spatialmath.Geometry {
 	boxHeight := collisionZ - cylinderHeight // 100mm
 
 	// EPick body: capsule centered at Z=35mm (midpoint of 0..70)
-	// Capsule requires length > diameter, so radius must be < 35mm.
-	// EPick body is ~75mm diameter, use 34mm radius for a close fit.
 	body, err := spatialmath.NewCapsule(
 		spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: cylinderHeight / 2}),
-		34,           // radius ~68mm diameter (close to 75mm actual body)
+		34,             // radius ~68mm diameter (close to 75mm actual body)
 		cylinderHeight, // 70mm length
 		label+"-body",
 	)

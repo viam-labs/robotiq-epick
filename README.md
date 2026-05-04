@@ -22,7 +22,7 @@ This [Viam module](https://docs.viam.com/) provides a driver for the [Robotiq EP
 
 ### UR Firewall Configuration
 
-The Robotiq URCap socket (port 63352) listens on `127.0.0.1` by default. The UR's security settings may also block external access. To fix:
+The Robotiq URCap socket (port 63352) may be blocked by the UR's security settings. To fix:
 
 1. On the pendant: **Settings** > **Security**
 2. Ensure port 63352 is **not** in the "disable inbound access" port range
@@ -42,7 +42,7 @@ Add the **module** (or search for `robotiq-epick` in the registry):
 }
 ```
 
-Add the **gripper component**:
+Add the **gripper component** with a frame parented to the arm:
 
 ### Automatic mode (default)
 
@@ -57,7 +57,10 @@ The gripper automatically detects vacuum levels, timeout, and hysteresis. It wil
   "attributes": {
     "host": "10.1.0.84"
   },
-  "depends_on": []
+  "depends_on": [],
+  "frame": {
+    "parent": "arm"
+  }
 }
 ```
 
@@ -78,7 +81,10 @@ User sets desired vacuum levels and timeout. Best for consistent production beha
     "min_pressure_pct": 40,
     "timeout_ms": 3000
   },
-  "depends_on": []
+  "depends_on": [],
+  "frame": {
+    "parent": "arm"
+  }
 }
 ```
 
@@ -92,6 +98,43 @@ User sets desired vacuum levels and timeout. Best for consistent production beha
 | `max_pressure_pct` | int | No | `60` | Maximum vacuum level (20-100%), advanced mode |
 | `min_pressure_pct` | int | No | `40` | Minimum vacuum level (10-100%), advanced mode |
 | `timeout_ms` | int | No | `3000` | Grip timeout in ms, advanced mode |
+
+## Frame and Collision Geometry
+
+The module returns a kinematic model via `Kinematics()` that defines both the collision geometry and the tool center point (TCP). No `translation` is needed in the frame config — just set `parent: "arm"`.
+
+```
+    UR Arm Flange (Z=0)
+    ━━━━━━━━━━━━━━━━━━━━
+    │                    │
+    │  ┌──────────────┐  │
+    │  │   Capsule     │  │  Z=0 to Z=70mm
+    │  │  68mm dia     │  │  EPick body
+    │  │  (collision)  │  │
+    │  └──────────────┘  │
+    │                    │
+    │ ┌────────────────┐ │
+    │ │                │ │
+    │ │     Box        │ │  Z=70 to Z=170mm
+    │ │  230 x 150mm   │ │  Bracket + hoses
+    │ │  (collision)   │ │
+    │ │                │ │
+    │ └────────────────┘ │
+    │                    │  Z=170 to Z=196mm
+    │    ~ clearance ~   │  No collision (allows approach)
+    │                    │
+    ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+         TCP (Z=196mm)      <-- planner targets poses here
+        Suction cup tips
+```
+
+The collision geometry is intentionally undersized (stops at Z=170mm) so the motion planner allows the suction cups to reach the workpiece surface. The 26mm clearance between the collision boundary and TCP ensures the planner won't reject valid pick/place approaches.
+
+**Dimensions based on actual measurements:**
+- EPick body: ~75mm diameter, 70mm tall
+- Widest point (bracket + hoses): 210mm x 130mm
+- Collision padding: +20mm on all sides
+- TCP: 196mm from flange (4-cup configuration, from manual Table 6-4)
 
 ## API
 
@@ -133,8 +176,8 @@ Available registers: `ACT`, `MOD`, `GTO`, `STA`, `OBJ`, `FLT`, `POS`, `SPE`, `FO
 This module uses the same socket-based text protocol as the [viam-modules/robotiq](https://github.com/viam-modules/robotiq) 2F gripper module. The Robotiq URCap exposes a TCP socket on port 63352 that accepts commands in the format:
 
 ```
-SET <register> <value>\r\n  →  "ack"
-GET <register>\r\n          →  "<register> <value>"
+SET <register> <value>\r\n  ->  "ack"
+GET <register>\r\n          ->  "<register> <value>"
 ```
 
 ### EPick register mapping
@@ -163,7 +206,7 @@ Ensure both the module AND the gripper component are in the config. The module m
 In automatic mode, the EPick's initial grip phase is ~2 seconds. Ensure the object is already in contact with the suction cup when `Grab` is called.
 
 ### Fault code 6 after grab
-This is "grip timeout" — the EPick tried to grip but couldn't detect an object within the timeout. The object may not have been sealed against the cup, or there's an air leak.
+This is "grip timeout" -- the EPick tried to grip but couldn't detect an object within the timeout. The object may not have been sealed against the cup, or there's an air leak.
 
 ## Building
 
