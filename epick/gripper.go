@@ -119,19 +119,14 @@ func newEPickGripper(
 		opMgr:  operation.NewSingleOperationManager(),
 	}
 
-	// Build default geometry for the EPick (4-cup bracket dimensions).
-	// If the user configures a frame with geometry on the component, Viam uses that instead.
-	// This geometry is centered at half the gripper height below the flange.
-	geom, err := spatialmath.NewBox(
-		spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: -defaultTCPZmm / 2}),
-		r3.Vector{X: defaultBodyWidthX, Y: defaultBodyWidthY, Z: defaultBodyHeightZ},
-		g.Name().ShortName(),
-	)
-	if err == nil {
-		g.geometries = []spatialmath.Geometry{geom}
-	}
+	// Build default geometries for the EPick.
+	// The arm's tool frame has +Z pointing away from the flange (toward the workpiece).
+	// We model two parts:
+	//   1. Gripper body: capsule ~75mm diameter, 101mm tall, centered at Z=50.5mm
+	//   2. Bracket + cups: box 160x82x95mm, centered at Z=148.5mm (from 101 to 196)
+	g.geometries = buildDefaultGeometries(g.Name().ShortName())
 
-	// Use frame geometry from config if provided.
+	// Override with frame geometry from config if provided.
 	if conf.Frame != nil && conf.Frame.Geometry != nil {
 		cfgGeom, err := conf.Frame.Geometry.ParseConfig()
 		if err == nil {
@@ -438,6 +433,37 @@ func (g *epickGripper) Close(ctx context.Context) error {
 }
 
 // --- Wait helpers ---
+
+// buildDefaultGeometries creates the EPick's collision geometry.
+// Modeled as two parts along +Z from the flange:
+//   - Body: capsule (cylinder-like), 75mm diameter, 101mm tall, from Z=0 to Z=101
+//   - Bracket + cups: box 160x82x95mm, from Z=101 to Z=196
+func buildDefaultGeometries(label string) []spatialmath.Geometry {
+	var geoms []spatialmath.Geometry
+
+	// Gripper body: capsule centered at Z=50.5mm (midpoint of 0..101)
+	body, err := spatialmath.NewCapsule(
+		spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: 50.5}),
+		37.5, // radius = 75mm / 2
+		101,  // length
+		label+"-body",
+	)
+	if err == nil {
+		geoms = append(geoms, body)
+	}
+
+	// Bracket + suction cups: box centered at Z=148.5mm (midpoint of 101..196)
+	bracket, err := spatialmath.NewBox(
+		spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: 148.5}),
+		r3.Vector{X: 160, Y: 82, Z: 95},
+		label+"-bracket",
+	)
+	if err == nil {
+		geoms = append(geoms, bracket)
+	}
+
+	return geoms
+}
 
 func (g *epickGripper) waitForObject(ctx context.Context, target int, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
