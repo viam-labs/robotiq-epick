@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/golang/geo/r3"
 	"go.viam.com/rdk/components/gripper"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/operation"
@@ -68,13 +69,23 @@ func init() {
 	})
 }
 
+// Default EPick dimensions in mm (from manual Table 6-4, section 6.1).
+// These are for the 4-cup configuration. Override via frame geometry in config.
+const (
+	defaultTCPZmm     = 196.0 // Flange to suction cup tip (4 cups)
+	defaultBodyWidthX  = 160.0 // 4-cup bracket width
+	defaultBodyWidthY  = 82.0  // 4-cup bracket depth
+	defaultBodyHeightZ = 196.0 // Total height from flange to cup tips
+)
+
 type epickGripper struct {
 	resource.Named
 	resource.AlwaysRebuild
-	conn   net.Conn
-	conf   *Config
-	logger logging.Logger
-	opMgr  *operation.SingleOperationManager
+	conn       net.Conn
+	conf       *Config
+	logger     logging.Logger
+	opMgr      *operation.SingleOperationManager
+	geometries []spatialmath.Geometry
 }
 
 func newEPickGripper(
@@ -106,6 +117,26 @@ func newEPickGripper(
 		conf:   cfg,
 		logger: logger,
 		opMgr:  operation.NewSingleOperationManager(),
+	}
+
+	// Build default geometry for the EPick (4-cup bracket dimensions).
+	// If the user configures a frame with geometry on the component, Viam uses that instead.
+	// This geometry is centered at half the gripper height below the flange.
+	geom, err := spatialmath.NewBox(
+		spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: -defaultTCPZmm / 2}),
+		r3.Vector{X: defaultBodyWidthX, Y: defaultBodyWidthY, Z: defaultBodyHeightZ},
+		g.Name().ShortName(),
+	)
+	if err == nil {
+		g.geometries = []spatialmath.Geometry{geom}
+	}
+
+	// Use frame geometry from config if provided.
+	if conf.Frame != nil && conf.Frame.Geometry != nil {
+		cfgGeom, err := conf.Frame.Geometry.ParseConfig()
+		if err == nil {
+			g.geometries = []spatialmath.Geometry{cfgGeom}
+		}
 	}
 
 	if err := g.activate(ctx); err != nil {
@@ -337,9 +368,9 @@ func (g *epickGripper) IsMoving(ctx context.Context) (bool, error) {
 	return g.opMgr.OpRunning(), nil
 }
 
-// Geometries returns spatial geometries (none by default).
+// Geometries returns the EPick's spatial geometry for collision avoidance.
 func (g *epickGripper) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
-	return nil, nil
+	return g.geometries, nil
 }
 
 // Kinematics returns the kinematic model (not applicable for vacuum gripper).
