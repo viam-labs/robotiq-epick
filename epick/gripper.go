@@ -434,19 +434,37 @@ func (g *epickGripper) Close(ctx context.Context) error {
 // --- Wait helpers ---
 
 // buildDefaultGeometries creates the EPick's collision geometry.
-// Single box along +Z from the flange, undersized so the planner
-// allows the suction cups to reach the workpiece.
+// Two parts along +Z from the flange:
+//   - Cylinder (capsule): 70mm tall from flange, covers the EPick body
+//   - Box: remaining 100mm, covers the bracket, hoses, and suction cups
 func buildDefaultGeometries(label string) []spatialmath.Geometry {
-	// Box centered at half the collision height along +Z.
-	geom, err := spatialmath.NewBox(
-		spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: collisionZ / 2}),
-		r3.Vector{X: collisionX, Y: collisionY, Z: collisionZ},
-		label,
+	var geoms []spatialmath.Geometry
+
+	const cylinderHeight = 70.0
+	boxHeight := collisionZ - cylinderHeight // 100mm
+
+	// EPick body: capsule centered at Z=35mm (midpoint of 0..70)
+	body, err := spatialmath.NewCapsule(
+		spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: cylinderHeight / 2}),
+		collisionY/2, // radius = 75mm (150/2), covers body + padding
+		cylinderHeight,
+		label+"-body",
 	)
-	if err != nil {
-		return nil
+	if err == nil {
+		geoms = append(geoms, body)
 	}
-	return []spatialmath.Geometry{geom}
+
+	// Bracket + hoses + cups: box centered at Z=120mm (midpoint of 70..170)
+	bracket, err := spatialmath.NewBox(
+		spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: cylinderHeight + boxHeight/2}),
+		r3.Vector{X: collisionX, Y: collisionY, Z: boxHeight},
+		label+"-bracket",
+	)
+	if err == nil {
+		geoms = append(geoms, bracket)
+	}
+
+	return geoms
 }
 
 func (g *epickGripper) waitForObject(ctx context.Context, target int, timeout time.Duration) error {
