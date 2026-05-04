@@ -9,13 +9,13 @@ package epick
 
 import (
 	"context"
+	_ "embed"
 	"fmt"
 	"net"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/golang/geo/r3"
 	"go.viam.com/rdk/components/gripper"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/operation"
@@ -24,6 +24,9 @@ import (
 	"go.viam.com/rdk/spatialmath"
 	"go.viam.com/utils"
 )
+
+//go:embed epick_model.json
+var epickModelJSON []byte
 
 // Model is the Viam model for the Robotiq EPick vacuum gripper.
 var Model = resource.NewModel("shrews-testing", "robotiq", "epick")
@@ -69,24 +72,13 @@ func init() {
 	})
 }
 
-// Default EPick collision geometry dimensions in mm.
-// Intentionally undersized vs the physical gripper so the motion planner
-// allows the suction cups to reach the workpiece surface.
-// Physical widest point is 210x130mm, TCP at Z=196mm.
-const (
-	collisionX = 230.0 // 210mm widest + 20mm padding
-	collisionY = 150.0 // 130mm widest + 20mm padding
-	collisionZ = 170.0 // 150mm body height + 20mm top padding (stops before cup tips)
-)
-
 type epickGripper struct {
 	resource.Named
 	resource.AlwaysRebuild
-	conn       net.Conn
-	conf       *Config
-	logger     logging.Logger
-	opMgr      *operation.SingleOperationManager
-	geometries []spatialmath.Geometry
+	conn   net.Conn
+	conf   *Config
+	logger logging.Logger
+	opMgr  *operation.SingleOperationManager
 }
 
 func newEPickGripper(
@@ -118,19 +110,6 @@ func newEPickGripper(
 		conf:   cfg,
 		logger: logger,
 		opMgr:  operation.NewSingleOperationManager(),
-	}
-
-	// Build default collision geometry for the EPick.
-	// Single box covering the gripper body, centered at half the collision height.
-	// Stops short of the suction cup tips so the planner can approach surfaces.
-	g.geometries = buildDefaultGeometries(g.Name().ShortName())
-
-	// Override with frame geometry from config if provided.
-	if conf.Frame != nil && conf.Frame.Geometry != nil {
-		cfgGeom, err := conf.Frame.Geometry.ParseConfig()
-		if err == nil {
-			g.geometries = []spatialmath.Geometry{cfgGeom}
-		}
 	}
 
 	if err := g.activate(ctx); err != nil {
@@ -364,49 +343,22 @@ func (g *epickGripper) IsMoving(ctx context.Context) (bool, error) {
 
 // Geometries returns the EPick's spatial geometry for collision avoidance.
 func (g *epickGripper) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
-	return g.geometries, nil
+	model, err := g.Kinematics(ctx)
+	if err != nil {
+		return nil, nil
+	}
+	gif, err := model.Geometries([]referenceframe.Input{})
+	if err != nil {
+		return nil, nil
+	}
+	return gif.Geometries(), nil
 }
 
 // Kinematics returns a zero-DOF kinematic model with collision geometries
 // and a TCP endpoint at the suction cup tips (196mm from the flange).
+// The model is built from embedded JSON so it serializes correctly over gRPC.
 func (g *epickGripper) Kinematics(ctx context.Context) (referenceframe.Model, error) {
-	name := g.Name().ShortName()
-	cfg := &referenceframe.ModelConfigJSON{
-		Name:  name,
-		Links: []referenceframe.LinkConfig{},
-	}
-
-	parent := referenceframe.World
-
-	// Add collision geometry links.
-	for _, geom := range g.geometries {
-		f, err := referenceframe.NewStaticFrameWithGeometry(geom.Label(), spatialmath.NewZeroPose(), geom)
-		if err != nil {
-			return nil, err
-		}
-		lf, err := referenceframe.NewLinkConfig(f)
-		if err != nil {
-			return nil, err
-		}
-		lf.Parent = parent
-		parent = geom.Label()
-		cfg.Links = append(cfg.Links, *lf)
-	}
-
-	// Add TCP endpoint at the suction cup tips.
-	tcpPose := spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: tcpOffsetZ})
-	tcpFrame, err := referenceframe.NewStaticFrame(name+"-tcp", tcpPose)
-	if err != nil {
-		return nil, err
-	}
-	tcpLink, err := referenceframe.NewLinkConfig(tcpFrame)
-	if err != nil {
-		return nil, err
-	}
-	tcpLink.Parent = parent
-	cfg.Links = append(cfg.Links, *tcpLink)
-
-	return cfg.ParseConfig(name)
+	return referenceframe.UnmarshalModelJSON(epickModelJSON, g.Name().ShortName())
 }
 
 // CurrentInputs returns current joint positions (not applicable for vacuum gripper).
@@ -469,45 +421,6 @@ func (g *epickGripper) Close(ctx context.Context) error {
 }
 
 // --- Wait helpers ---
-
-// TCP offset from the flange to the suction cup tips (mm).
-const tcpOffsetZ = 196.0
-
-// buildDefaultGeometries creates the EPick's collision geometry.
-// Geometries are positioned relative to the flange (Z=0 at flange, +Z toward workpiece).
-// Two parts:
-//   - Capsule: EPick body, from Z=0 to Z=70
-//   - Box: bracket/hoses/cups, from Z=70 to Z=170
-// The last 26mm to the cup tips (Z=170..196) is left clear for approach.
-func buildDefaultGeometries(label string) []spatialmath.Geometry {
-	var geoms []spatialmath.Geometry
-
-	const cylinderHeight = 70.0
-	boxHeight := collisionZ - cylinderHeight // 100mm
-
-	// EPick body: capsule centered at Z=35mm (midpoint of 0..70)
-	body, err := spatialmath.NewCapsule(
-		spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: cylinderHeight / 2}),
-		34,             // radius ~68mm diameter (close to 75mm actual body)
-		cylinderHeight, // 70mm length
-		label+"-body",
-	)
-	if err == nil {
-		geoms = append(geoms, body)
-	}
-
-	// Bracket + hoses + cups: box centered at Z=120mm (midpoint of 70..170)
-	bracket, err := spatialmath.NewBox(
-		spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: cylinderHeight + boxHeight/2}),
-		r3.Vector{X: collisionX, Y: collisionY, Z: boxHeight},
-		label+"-bracket",
-	)
-	if err == nil {
-		geoms = append(geoms, bracket)
-	}
-
-	return geoms
-}
 
 func (g *epickGripper) waitForObject(ctx context.Context, target int, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)

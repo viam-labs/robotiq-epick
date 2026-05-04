@@ -1,0 +1,30 @@
+{
+  "name": "epick",
+  "links": [
+    {
+      "id": "epick-body",
+      "parent": "world",
+      "translation": { "x": 0, "y": 0, "z": 0 },
+      "orientation": { "type": "ov_degrees", "value": { "x": 0, "y": 0, "z": 1, "th": 0 } },
+      "geometry": {
+        "type": "capsule",
+        "r": 34,
+        "l": 70,
+        "translation": { "x": 0, "y": 0, "z": -161 }
+      }
+    },
+    {
+      "id": "epick-bracket",
+      "parent": "epick-body",
+      "translation": { "x": 0, "y": 0, "z": 0 },
+      "orientation": { "type": "ov_degrees", "value": { "x": 0, "y": 0, "z": 1, "th": 0 } },
+      "geometry": {
+        "type": "box",
+        "x": 230,
+        "y": 150,
+        "z": 100,
+        "translation": { "x": 0, "y": 0, "z": -76 }
+      }
+    }
+  ]
+}
