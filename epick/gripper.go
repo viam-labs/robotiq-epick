@@ -274,8 +274,12 @@ func (g *epickGripper) Grab(ctx context.Context, extra map[string]interface{}) (
 	if g.conf.TimeoutMs != 0 {
 		timeoutMs = g.conf.TimeoutMs + 2000
 	}
-	if err := g.waitForGrip(ctx, time.Duration(timeoutMs)*time.Millisecond); err != nil {
-		return false, err
+	_ = g.waitForGrip(ctx, time.Duration(timeoutMs)*time.Millisecond)
+
+	// Give the EPick a moment to settle, then check final state.
+	// In automatic mode the EPick may still be transitioning to holding mode.
+	if !utils.SelectContextOrWait(ctx, 500*time.Millisecond) {
+		return false, ctx.Err()
 	}
 
 	obj, err := g.getInt("OBJ")
@@ -428,13 +432,15 @@ func (g *epickGripper) waitForGrip(ctx context.Context, timeout time.Duration) e
 			return err
 		}
 		obj, err := g.getInt("OBJ")
-		if err == nil && obj != 0 {
-			return nil // Any non-zero OBJ means grip attempt finished.
-		}
-		// Check for faults.
-		flt, fltErr := g.getInt("FLT")
-		if fltErr == nil && flt != 0 {
-			return fmt.Errorf("gripper fault 0x%X during grip", flt)
+		if err == nil {
+			// OBJ 1 = min vacuum reached, OBJ 2 = max vacuum reached.
+			if obj == 1 || obj == 2 {
+				return nil
+			}
+			// OBJ 3 = no object / grip timeout. Stop waiting.
+			if obj == 3 {
+				return nil
+			}
 		}
 		if !utils.SelectContextOrWait(ctx, 100*time.Millisecond) {
 			return ctx.Err()
