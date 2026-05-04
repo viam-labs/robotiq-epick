@@ -444,10 +444,12 @@ func buildDefaultGeometries(label string) []spatialmath.Geometry {
 	boxHeight := collisionZ - cylinderHeight // 100mm
 
 	// EPick body: capsule centered at Z=35mm (midpoint of 0..70)
+	// Capsule requires length > diameter, so radius must be < 35mm.
+	// EPick body is ~75mm diameter, use 34mm radius for a close fit.
 	body, err := spatialmath.NewCapsule(
 		spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: cylinderHeight / 2}),
-		collisionY/2, // radius = 75mm (150/2), covers body + padding
-		cylinderHeight,
+		34,           // radius ~68mm diameter (close to 75mm actual body)
+		cylinderHeight, // 70mm length
 		label+"-body",
 	)
 	if err == nil {
