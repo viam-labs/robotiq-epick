@@ -1,7 +1,7 @@
 {
   "$schema": "https://dl.viam.dev/module.schema.json",
   "module_id": "shrews-testing:robotiq-epick",
-  "visibility": "public_unlisted",
+  "visibility": "public",
   "url": "https://github.com/viam-labs/robotiq-epick",
   "description": "Go module for Robotiq EPick vacuum gripper, compatible with Viam",
   "models": [
@@ -13,11 +13,14 @@
     }
   ],
   "build": {
+    "setup": "make setup",
     "build": "make module",
     "path": "bin/module.tar.gz",
     "arch": [
+      "linux/amd64",
       "linux/arm64",
-      "linux/amd64"
+      "darwin/amd64",
+      "darwin/arm64"
     ]
   },
   "entrypoint": "bin/robotiq-epick"
