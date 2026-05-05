@@ -4,6 +4,9 @@
 // This is the same protocol used by the 2F gripper module, adapted
 // for vacuum gripper semantics (pressure instead of position).
 //
+// All socket I/O runs on a single goroutine to avoid response interleaving.
+// A keepalive poll (GET ACT) fires every 500ms to prevent EPick fault 0x9.
+//
 // Reference: Robotiq EPick Instruction Manual for e-Series (2021-07-09)
 package epick
 
@@ -14,7 +17,6 @@ import (
 	"net"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"go.viam.com/rdk/components/gripper"
@@ -36,19 +38,12 @@ const defaultPort = 63352
 
 // Config is the configuration for the EPick gripper.
 type Config struct {
-	// Host is the UR controller IP address (e.g. "192.168.1.100").
-	// The Robotiq URCap must be installed on the UR controller.
-	Host string `json:"host"`
-	// Port is the URCap socket port. Default: 63352.
-	Port int `json:"port,omitempty"`
-	// Mode is the gripper operating mode: "automatic" or "advanced". Default: "automatic".
-	Mode string `json:"mode,omitempty"`
-	// MaxPressurePct is the maximum vacuum level (20-100%) for advanced mode. Default: 60.
-	MaxPressurePct int `json:"max_pressure_pct,omitempty"`
-	// MinPressurePct is the minimum vacuum level (10-100%) for advanced mode. Default: 40.
-	MinPressurePct int `json:"min_pressure_pct,omitempty"`
-	// TimeoutMs is the grip timeout in milliseconds for advanced mode. Default: 3000.
-	TimeoutMs int `json:"timeout_ms,omitempty"`
+	Host           string `json:"host"`
+	Port           int    `json:"port,omitempty"`
+	Mode           string `json:"mode,omitempty"`
+	MaxPressurePct int    `json:"max_pressure_pct,omitempty"`
+	MinPressurePct int    `json:"min_pressure_pct,omitempty"`
+	TimeoutMs      int    `json:"timeout_ms,omitempty"`
 }
 
 func (cfg *Config) Validate(path string) ([]string, []string, error) {
@@ -73,16 +68,25 @@ func init() {
 	})
 }
 
+// socketRequest is sent to the I/O goroutine via the requests channel.
+type socketRequest struct {
+	msg  string
+	resp chan socketResponse
+}
+
+type socketResponse struct {
+	data string
+	err  error
+}
+
 type epickGripper struct {
 	resource.Named
 	resource.AlwaysRebuild
-	mu              sync.Mutex
-	conn            net.Conn
-	conf            *Config
-	logger          logging.Logger
-	opMgr           *operation.SingleOperationManager
-	keepaliveCancel context.CancelFunc
-	keepalivePaused bool // when true, keepalive skips its poll
+	conf     *Config
+	logger   logging.Logger
+	opMgr    *operation.SingleOperationManager
+	requests chan socketRequest // all socket I/O funnels through here
+	done     chan struct{}      // closed when the I/O goroutine exits
 }
 
 func newEPickGripper(
@@ -109,28 +113,121 @@ func newEPickGripper(
 	}
 
 	g := &epickGripper{
-		Named:  conf.ResourceName().AsNamed(),
-		conn:   conn,
-		conf:   cfg,
-		logger: logger,
-		opMgr:  operation.NewSingleOperationManager(),
+		Named:    conf.ResourceName().AsNamed(),
+		conf:     cfg,
+		logger:   logger,
+		opMgr:    operation.NewSingleOperationManager(),
+		requests: make(chan socketRequest),
+		done:     make(chan struct{}),
 	}
+
+	// Single goroutine owns the socket. All reads/writes go through it.
+	// Keepalive fires on the same goroutine between commands — no races.
+	go g.ioLoop(conn)
 
 	if err := g.activate(ctx); err != nil {
-		conn.Close()
+		close(g.requests) // signal ioLoop to exit
+		<-g.done
 		return nil, fmt.Errorf("failed to activate EPick: %w", err)
 	}
-
-	// Start keepalive goroutine to prevent EPick communication timeout (fault 0x9).
-	// The EPick faults if it receives no communication for 1 second.
-	kaCtx, kaCancel := context.WithCancel(context.Background())
-	g.keepaliveCancel = kaCancel
-	go g.keepalive(kaCtx)
 
 	return g, nil
 }
 
-// activate sends the initialization sequence for the vacuum gripper.
+// ioLoop runs on a single goroutine. It owns the socket and handles
+// all send/receive plus keepalive. No locks needed.
+func (g *epickGripper) ioLoop(conn net.Conn) {
+	defer close(g.done)
+	defer conn.Close()
+
+	buf := make([]byte, 128)
+	keepalive := time.NewTicker(500 * time.Millisecond)
+	defer keepalive.Stop()
+
+	send := func(msg string) (string, error) {
+		if _, err := conn.Write([]byte(msg)); err != nil {
+			return "", err
+		}
+		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, err := conn.Read(buf)
+		if err != nil {
+			return "", err
+		}
+		return strings.TrimSpace(string(buf[:n])), nil
+	}
+
+	for {
+		select {
+		case req, ok := <-g.requests:
+			if !ok {
+				return // channel closed, shut down
+			}
+			data, err := send(req.msg)
+			req.resp <- socketResponse{data, err}
+
+			// Reset keepalive timer after any real command,
+			// since we just communicated.
+			keepalive.Reset(500 * time.Millisecond)
+
+		case <-keepalive.C:
+			// Prevent EPick fault 0x9 (no communication for 1 second).
+			_, _ = send("GET ACT\n")
+		}
+	}
+}
+
+// Send dispatches a message to the I/O goroutine and waits for the response.
+func (g *epickGripper) Send(msg string) (string, error) {
+	resp := make(chan socketResponse, 1)
+	select {
+	case g.requests <- socketRequest{msg, resp}:
+	case <-g.done:
+		return "", fmt.Errorf("connection closed")
+	}
+	select {
+	case r := <-resp:
+		return r.data, r.err
+	case <-g.done:
+		return "", fmt.Errorf("connection closed")
+	}
+}
+
+// Set sends "SET <what> <to>\r\n" and expects "ack".
+func (g *epickGripper) Set(what, to string) error {
+	res, err := g.Send(fmt.Sprintf("SET %s %s\r\n", what, to))
+	if err != nil {
+		return err
+	}
+	if res != "ack" {
+		return fmt.Errorf("expected ack, got [%s]", res)
+	}
+	return nil
+}
+
+// Get sends "GET <what>\r\n" and returns the response.
+func (g *epickGripper) Get(what string) (string, error) {
+	return g.Send(fmt.Sprintf("GET %s\r\n", what))
+}
+
+// getInt sends a GET command and parses the integer value from "KEY value" response.
+func (g *epickGripper) getInt(what string) (int, error) {
+	res, err := g.Get(what)
+	if err != nil {
+		return 0, err
+	}
+	parts := strings.SplitN(res, " ", 2)
+	if len(parts) != 2 {
+		return 0, fmt.Errorf("unexpected response format: %q", res)
+	}
+	val, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse value from %q: %w", res, err)
+	}
+	return val, nil
+}
+
+// --- Activation ---
+
 func (g *epickGripper) activate(ctx context.Context) error {
 	g.logger.CInfof(ctx, "activating EPick gripper")
 
@@ -140,12 +237,11 @@ func (g *epickGripper) activate(ctx context.Context) error {
 	}
 
 	cmds := [][]string{
-		{"ACT", "1"},  // activate gripper
-		{"MOD", mode}, // set operating mode
-		{"GTO", "1"},  // enable regulation
+		{"ACT", "1"},
+		{"MOD", mode},
+		{"GTO", "1"},
 	}
 
-	// In advanced mode, set pressure and timeout parameters.
 	if g.conf.Mode == "advanced" {
 		maxPct := g.conf.MaxPressurePct
 		if maxPct == 0 {
@@ -159,11 +255,8 @@ func (g *epickGripper) activate(ctx context.Context) error {
 		if timeoutMs == 0 {
 			timeoutMs = 3000
 		}
-		// POS register = pressure request: 100 - pct (for grip)
 		cmds = append(cmds, []string{"POS", strconv.Itoa(100 - maxPct)})
-		// SPE register = timeout: each unit = 100ms
 		cmds = append(cmds, []string{"SPE", strconv.Itoa(timeoutMs / 100)})
-		// FOR register = min pressure: 100 - pct
 		cmds = append(cmds, []string{"FOR", strconv.Itoa(100 - minPct)})
 	}
 
@@ -186,81 +279,15 @@ func (g *epickGripper) activate(ctx context.Context) error {
 	return nil
 }
 
-// --- Socket protocol ---
-
-// Send writes a message and reads the response. Thread-safe.
-func (g *epickGripper) Send(msg string) (string, error) {
-	_, err := g.conn.Write([]byte(msg))
-	if err != nil {
-		return "", err
-	}
-	return g.read()
-}
-
-// Set sends "SET <what> <to>\r\n" and expects "ack".
-func (g *epickGripper) Set(what, to string) error {
-	res, err := g.Send(fmt.Sprintf("SET %s %s\r\n", what, to))
-	if err != nil {
-		return err
-	}
-	if res != "ack" {
-		return fmt.Errorf("expected ack, got [%s]", res)
-	}
-	return nil
-}
-
-// Get sends "GET <what>\r\n" and returns the response.
-func (g *epickGripper) Get(what string) (string, error) {
-	return g.Send(fmt.Sprintf("GET %s\r\n", what))
-}
-
-func (g *epickGripper) read() (string, error) {
-	buf := make([]byte, 128)
-	x, err := g.conn.Read(buf)
-	if err != nil {
-		return "", err
-	}
-	if x > 100 {
-		return "", fmt.Errorf("read too much: %d bytes", x)
-	}
-	if x == 0 {
-		return "", nil
-	}
-	return strings.TrimSpace(string(buf[0:x])), nil
-}
-
-// getInt sends a GET command and parses the integer value from "KEY value" response.
-func (g *epickGripper) getInt(what string) (int, error) {
-	res, err := g.Get(what)
-	if err != nil {
-		return 0, err
-	}
-	parts := strings.SplitN(res, " ", 2)
-	if len(parts) != 2 {
-		return 0, fmt.Errorf("unexpected response format: %q", res)
-	}
-	val, err := strconv.Atoi(parts[1])
-	if err != nil {
-		return 0, fmt.Errorf("failed to parse value from %q: %w", res, err)
-	}
-	return val, nil
-}
-
 // --- Gripper interface ---
 
-// Open releases vacuum (sends release command).
-// Keeps the gripper in advanced mode so the next Grab() doesn't need to re-initialize.
+// Open releases vacuum. Stays in advanced mode for the next Grab().
 func (g *epickGripper) Open(ctx context.Context, extra map[string]interface{}) error {
 	ctx, done := g.opMgr.New(ctx)
 	defer done()
 
-
 	g.logger.CDebugf(ctx, "releasing vacuum (open)")
-	g.pauseKeepalive()
-	defer g.resumeKeepalive()
 
-	// In advanced mode, POS >= 100 sends a release command.
-	// Re-assert GTO around the change per the manual.
 	if err := g.Set("GTO", "0"); err != nil {
 		return fmt.Errorf("release failed: %w", err)
 	}
@@ -271,28 +298,18 @@ func (g *epickGripper) Open(ctx context.Context, extra map[string]interface{}) e
 		return fmt.Errorf("release failed: %w", err)
 	}
 
-	// Wait for release to complete.
 	return g.waitForObject(ctx, int(ObjNoObject), 5*time.Second)
 }
 
-// Grab activates vacuum and returns whether an object was detected.
-// Pass extra["non_blocking"] = true to turn on vacuum and return immediately
-// without waiting for object detection. Useful when the arm still needs to
-// descend onto the workpiece after vacuum is enabled — check IsHoldingSomething()
-// later to verify the seal.
+// Grab activates vacuum. Non-blocking by default — returns immediately after
+// turning on vacuum. Pass extra["blocking"]=true to wait for object detection.
 func (g *epickGripper) Grab(ctx context.Context, extra map[string]interface{}) (bool, error) {
 	ctx, done := g.opMgr.New(ctx)
 	defer done()
 
-
 	g.logger.CDebugf(ctx, "activating vacuum (grab)")
-	g.pauseKeepalive()
-	defer g.resumeKeepalive()
 
-	// Use advanced mode (MOD=1) with continuous vacuum (POS=0, SPE=0).
-	// Automatic mode has a built-in ~2s timeout that shuts off the pump,
-	// which doesn't work for porous materials or vacuum-before-descend workflows.
-	// Advanced mode with POS=0 keeps the pump running indefinitely.
+	// Switch to advanced mode with continuous vacuum and no timeout.
 	if err := g.Set("GTO", "0"); err != nil {
 		return false, fmt.Errorf("grip failed: %w", err)
 	}
@@ -300,18 +317,16 @@ func (g *epickGripper) Grab(ctx context.Context, extra map[string]interface{}) (
 		return false, fmt.Errorf("grip failed: %w", err)
 	}
 
-	gripVal := "0" // Continuous vacuum (generator always ON)
+	gripVal := "0"
 	if g.conf.Mode == "advanced" && g.conf.MaxPressurePct != 0 {
 		gripVal = strconv.Itoa(100 - g.conf.MaxPressurePct)
 	}
 	if err := g.Set("POS", gripVal); err != nil {
 		return false, fmt.Errorf("grip failed: %w", err)
 	}
-	if err := g.Set("SPE", "0"); err != nil { // No timeout
+	if err := g.Set("SPE", "0"); err != nil {
 		return false, fmt.Errorf("grip failed: %w", err)
 	}
-	// Set min pressure threshold low for porous materials.
-	// FOR = 100 - min_pct. 90 = 10% vacuum triggers object detection.
 	forVal := "90"
 	if g.conf.MinPressurePct != 0 {
 		forVal = strconv.Itoa(100 - g.conf.MinPressurePct)
@@ -323,14 +338,13 @@ func (g *epickGripper) Grab(ctx context.Context, extra map[string]interface{}) (
 		return false, fmt.Errorf("grip failed: %w", err)
 	}
 
-	// Default: return immediately after activating vacuum (non-blocking).
-	// The caller should use IsHoldingSomething() to verify the seal after
-	// the arm descends onto the workpiece.
-	// Pass extra["blocking"] = true to wait for object detection before returning.
+	// Non-blocking by default.
 	blocking := false
-	if b, ok := extra["blocking"]; ok {
-		if v, ok := b.(bool); ok && v {
-			blocking = true
+	if extra != nil {
+		if b, ok := extra["blocking"]; ok {
+			if v, ok := b.(bool); ok && v {
+				blocking = true
+			}
 		}
 	}
 	if !blocking {
@@ -338,14 +352,12 @@ func (g *epickGripper) Grab(ctx context.Context, extra map[string]interface{}) (
 		return false, nil
 	}
 
-	// Blocking mode: wait for object detection or timeout.
 	timeoutMs := 5000
 	if g.conf.TimeoutMs != 0 {
 		timeoutMs = g.conf.TimeoutMs + 2000
 	}
 	_ = g.waitForGrip(ctx, time.Duration(timeoutMs)*time.Millisecond)
 
-	// Give the EPick a moment to settle, then check final state.
 	if !utils.SelectContextOrWait(ctx, 500*time.Millisecond) {
 		return false, ctx.Err()
 	}
@@ -354,17 +366,12 @@ func (g *epickGripper) Grab(ctx context.Context, extra map[string]interface{}) (
 	if err != nil {
 		return false, err
 	}
-	// OBJ 1 = min vacuum reached, OBJ 2 = max vacuum reached. Both mean object detected.
 	return obj == 1 || obj == 2, nil
 }
 
-// IsHoldingSomething checks whether the gripper is currently holding an object.
-// In continuous vacuum mode (POS=0), OBJ may stay at 0 (regulating) even when
-// an object is held, since the target vacuum level is never "reached". So we
-// also check actual pressure — any vacuum below a threshold means something
-// is sealed against the cups.
+// IsHoldingSomething checks vacuum seal. Also checks actual pressure for
+// continuous mode where OBJ may stay at 0.
 func (g *epickGripper) IsHoldingSomething(ctx context.Context, extra map[string]interface{}) (gripper.HoldingStatus, error) {
-
 	obj, err := g.getInt("OBJ")
 	if err != nil {
 		return gripper.HoldingStatus{}, err
@@ -373,7 +380,6 @@ func (g *epickGripper) IsHoldingSomething(ctx context.Context, extra map[string]
 	meta := map[string]interface{}{
 		"object_status_raw": obj,
 	}
-
 	switch obj {
 	case 0:
 		meta["object_status"] = "regulating"
@@ -385,12 +391,8 @@ func (g *epickGripper) IsHoldingSomething(ctx context.Context, extra map[string]
 		meta["object_status"] = "no_object"
 	}
 
-	// OBJ 1 or 2 = object detected by the EPick's own logic.
 	holding := obj == 1 || obj == 2
 
-	// In continuous mode, also check actual pressure.
-	// POS register: 100 = ambient (0 kPa), lower = more vacuum.
-	// If pressure is below 90 (~10 kPa vacuum), something is likely sealed.
 	pos, posErr := g.getInt("POS")
 	if posErr == nil {
 		meta["pressure_register"] = pos
@@ -406,19 +408,18 @@ func (g *epickGripper) IsHoldingSomething(ctx context.Context, extra map[string]
 	}, nil
 }
 
-// Stop disables vacuum regulation by clearing GTO.
+// Stop disables vacuum regulation.
 func (g *epickGripper) Stop(ctx context.Context, extra map[string]interface{}) error {
-
 	g.logger.CDebugf(ctx, "stopping gripper")
 	return g.Set("GTO", "0")
 }
 
-// IsMoving returns whether the gripper is actively operating.
+// IsMoving returns whether an operation is in progress.
 func (g *epickGripper) IsMoving(ctx context.Context) (bool, error) {
 	return g.opMgr.OpRunning(), nil
 }
 
-// Geometries returns the EPick's spatial geometry for collision avoidance.
+// Geometries returns collision geometry from the embedded kinematic model.
 func (g *epickGripper) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
 	model, err := g.Kinematics(ctx)
 	if err != nil {
@@ -431,9 +432,7 @@ func (g *epickGripper) Geometries(ctx context.Context, extra map[string]interfac
 	return gif.Geometries(), nil
 }
 
-// Kinematics returns a zero-DOF kinematic model with collision geometries
-// and a TCP endpoint at the suction cup tips (196mm from the flange).
-// The model is built from embedded JSON so it serializes correctly over gRPC.
+// Kinematics returns the embedded kinematic model (collision geometry + TCP offset).
 func (g *epickGripper) Kinematics(ctx context.Context) (referenceframe.Model, error) {
 	return referenceframe.UnmarshalModelJSON(epickModelJSON, g.Name().ShortName())
 }
@@ -455,11 +454,9 @@ func (g *epickGripper) Status(ctx context.Context) (map[string]interface{}, erro
 
 // DoCommand provides direct register access and status feedback.
 func (g *epickGripper) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
-
 	if _, ok := cmd["get_status"]; ok {
 		return g.getStatusMap()
 	}
-
 	if rawGet, ok := cmd["get"]; ok {
 		reg, ok := rawGet.(string)
 		if !ok {
@@ -471,7 +468,6 @@ func (g *epickGripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 		}
 		return map[string]interface{}{"response": res}, nil
 	}
-
 	if rawSet, ok := cmd["set"]; ok {
 		setMap, ok := rawSet.(map[string]interface{})
 		if !ok {
@@ -485,61 +481,18 @@ func (g *epickGripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 		}
 		return map[string]interface{}{"ok": true}, nil
 	}
-
 	return nil, fmt.Errorf("unknown command, supported: get_status, get, set")
 }
 
-// Close stops the keepalive and disconnects from the URCap.
+// Close shuts down the I/O goroutine and disconnects.
 func (g *epickGripper) Close(ctx context.Context) error {
 	g.logger.CInfof(ctx, "closing EPick connection")
-	if g.keepaliveCancel != nil {
-		g.keepaliveCancel()
-	}
-	if g.conn != nil {
-		return g.conn.Close()
-	}
+	close(g.requests)
+	<-g.done
 	return nil
 }
 
 // --- Wait helpers ---
-
-// keepalive polls the gripper periodically to prevent communication timeout
-// (fault 0x9: no communication during at least 1 second). Runs in a background
-// goroutine, stopped by Close().
-func (g *epickGripper) keepalive(ctx context.Context) {
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			g.mu.Lock()
-			paused := g.keepalivePaused
-			g.mu.Unlock()
-			if !paused {
-				_, _ = g.Get("ACT")
-			}
-		}
-	}
-}
-
-// pauseKeepalive stops the keepalive from polling. Caller must hold no locks.
-func (g *epickGripper) pauseKeepalive() {
-	g.mu.Lock()
-	g.keepalivePaused = true
-	g.mu.Unlock()
-	// Wait for any in-flight keepalive poll to finish.
-	// The mutex in Send() ensures this.
-	time.Sleep(50 * time.Millisecond)
-}
-
-// resumeKeepalive restarts keepalive polling.
-func (g *epickGripper) resumeKeepalive() {
-	g.mu.Lock()
-	g.keepalivePaused = false
-	g.mu.Unlock()
-}
 
 func (g *epickGripper) waitForObject(ctx context.Context, target int, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
@@ -555,7 +508,7 @@ func (g *epickGripper) waitForObject(ctx context.Context, target int, timeout ti
 			return ctx.Err()
 		}
 	}
-	return nil // Timeout on release is not necessarily an error.
+	return nil
 }
 
 func (g *epickGripper) waitForGrip(ctx context.Context, timeout time.Duration) error {
@@ -566,11 +519,9 @@ func (g *epickGripper) waitForGrip(ctx context.Context, timeout time.Duration) e
 		}
 		obj, err := g.getInt("OBJ")
 		if err == nil {
-			// OBJ 1 = min vacuum reached, OBJ 2 = max vacuum reached.
 			if obj == 1 || obj == 2 {
 				return nil
 			}
-			// OBJ 3 = no object / grip timeout. Stop waiting.
 			if obj == 3 {
 				return nil
 			}
@@ -584,7 +535,6 @@ func (g *epickGripper) waitForGrip(ctx context.Context, timeout time.Duration) e
 
 func (g *epickGripper) getStatusMap() (map[string]interface{}, error) {
 	result := map[string]interface{}{}
-
 	if obj, err := g.getInt("OBJ"); err == nil {
 		result["object_status_raw"] = obj
 		result["object_detected"] = obj == 1 || obj == 2
@@ -602,6 +552,5 @@ func (g *epickGripper) getStatusMap() (map[string]interface{}, error) {
 	if mod, err := g.getInt("MOD"); err == nil {
 		result["mode"] = mod
 	}
-
 	return result, nil
 }
