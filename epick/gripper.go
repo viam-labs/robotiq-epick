@@ -14,6 +14,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go.viam.com/rdk/components/gripper"
@@ -75,10 +76,12 @@ func init() {
 type epickGripper struct {
 	resource.Named
 	resource.AlwaysRebuild
-	conn   net.Conn
-	conf   *Config
-	logger logging.Logger
-	opMgr  *operation.SingleOperationManager
+	mu              sync.Mutex
+	conn            net.Conn
+	conf            *Config
+	logger          logging.Logger
+	opMgr           *operation.SingleOperationManager
+	keepaliveCancel context.CancelFunc
 }
 
 func newEPickGripper(
@@ -116,6 +119,12 @@ func newEPickGripper(
 		conn.Close()
 		return nil, fmt.Errorf("failed to activate EPick: %w", err)
 	}
+
+	// Start keepalive goroutine to prevent EPick communication timeout (fault 0x9).
+	// The EPick faults if it receives no communication for 1 second.
+	kaCtx, kaCancel := context.WithCancel(context.Background())
+	g.keepaliveCancel = kaCancel
+	go g.keepalive(kaCtx)
 
 	return g, nil
 }
@@ -178,7 +187,7 @@ func (g *epickGripper) activate(ctx context.Context) error {
 
 // --- Socket protocol ---
 
-// Send writes a message and reads the response.
+// Send writes a message and reads the response. Thread-safe.
 func (g *epickGripper) Send(msg string) (string, error) {
 	_, err := g.conn.Write([]byte(msg))
 	if err != nil {
@@ -239,14 +248,23 @@ func (g *epickGripper) getInt(what string) (int, error) {
 // --- Gripper interface ---
 
 // Open releases vacuum (sends release command).
+// Keeps the gripper in advanced mode so the next Grab() doesn't need to re-initialize.
 func (g *epickGripper) Open(ctx context.Context, extra map[string]interface{}) error {
 	ctx, done := g.opMgr.New(ctx)
 	defer done()
 
+
 	g.logger.CDebugf(ctx, "releasing vacuum (open)")
 
-	// POS >= 100 = release command in automatic mode.
+	// In advanced mode, POS >= 100 sends a release command.
+	// Re-assert GTO around the change per the manual.
+	if err := g.Set("GTO", "0"); err != nil {
+		return fmt.Errorf("release failed: %w", err)
+	}
 	if err := g.Set("POS", "100"); err != nil {
+		return fmt.Errorf("release failed: %w", err)
+	}
+	if err := g.Set("GTO", "1"); err != nil {
 		return fmt.Errorf("release failed: %w", err)
 	}
 
@@ -262,6 +280,7 @@ func (g *epickGripper) Open(ctx context.Context, extra map[string]interface{}) e
 func (g *epickGripper) Grab(ctx context.Context, extra map[string]interface{}) (bool, error) {
 	ctx, done := g.opMgr.New(ctx)
 	defer done()
+
 
 	g.logger.CDebugf(ctx, "activating vacuum (grab)")
 
@@ -340,6 +359,7 @@ func (g *epickGripper) Grab(ctx context.Context, extra map[string]interface{}) (
 // also check actual pressure — any vacuum below a threshold means something
 // is sealed against the cups.
 func (g *epickGripper) IsHoldingSomething(ctx context.Context, extra map[string]interface{}) (gripper.HoldingStatus, error) {
+
 	obj, err := g.getInt("OBJ")
 	if err != nil {
 		return gripper.HoldingStatus{}, err
@@ -383,6 +403,7 @@ func (g *epickGripper) IsHoldingSomething(ctx context.Context, extra map[string]
 
 // Stop disables vacuum regulation by clearing GTO.
 func (g *epickGripper) Stop(ctx context.Context, extra map[string]interface{}) error {
+
 	g.logger.CDebugf(ctx, "stopping gripper")
 	return g.Set("GTO", "0")
 }
@@ -429,6 +450,7 @@ func (g *epickGripper) Status(ctx context.Context) (map[string]interface{}, erro
 
 // DoCommand provides direct register access and status feedback.
 func (g *epickGripper) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+
 	if _, ok := cmd["get_status"]; ok {
 		return g.getStatusMap()
 	}
@@ -462,9 +484,12 @@ func (g *epickGripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 	return nil, fmt.Errorf("unknown command, supported: get_status, get, set")
 }
 
-// Close disconnects from the URCap.
+// Close stops the keepalive and disconnects from the URCap.
 func (g *epickGripper) Close(ctx context.Context) error {
 	g.logger.CInfof(ctx, "closing EPick connection")
+	if g.keepaliveCancel != nil {
+		g.keepaliveCancel()
+	}
 	if g.conn != nil {
 		return g.conn.Close()
 	}
@@ -472,6 +497,22 @@ func (g *epickGripper) Close(ctx context.Context) error {
 }
 
 // --- Wait helpers ---
+
+// keepalive polls the gripper periodically to prevent communication timeout
+// (fault 0x9: no communication during at least 1 second). Runs in a background
+// goroutine, stopped by Close().
+func (g *epickGripper) keepalive(ctx context.Context) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_, _ = g.Get("ACT")
+		}
+	}
+}
 
 func (g *epickGripper) waitForObject(ctx context.Context, target int, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
