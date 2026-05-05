@@ -288,6 +288,9 @@ func (g *epickGripper) Open(ctx context.Context, extra map[string]interface{}) e
 
 	g.logger.CDebugf(ctx, "releasing vacuum (open)")
 
+	if err := g.Set("ACT", "1"); err != nil {
+		return fmt.Errorf("release failed: %w", err)
+	}
 	if err := g.Set("GTO", "0"); err != nil {
 		return fmt.Errorf("release failed: %w", err)
 	}
@@ -308,6 +311,12 @@ func (g *epickGripper) Grab(ctx context.Context, extra map[string]interface{}) (
 	defer done()
 
 	g.logger.CDebugf(ctx, "activating vacuum (grab)")
+
+	// Ensure gripper is activated (rACT=1 must be set at all times).
+	// Re-activation is needed after a URCap reset or module restart.
+	if err := g.Set("ACT", "1"); err != nil {
+		return false, fmt.Errorf("grip failed: %w", err)
+	}
 
 	// Switch to advanced mode with continuous vacuum and no timeout.
 	if err := g.Set("GTO", "0"); err != nil {
