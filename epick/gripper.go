@@ -82,6 +82,7 @@ type epickGripper struct {
 	logger          logging.Logger
 	opMgr           *operation.SingleOperationManager
 	keepaliveCancel context.CancelFunc
+	keepalivePaused bool // when true, keepalive skips its poll
 }
 
 func newEPickGripper(
@@ -255,6 +256,8 @@ func (g *epickGripper) Open(ctx context.Context, extra map[string]interface{}) e
 
 
 	g.logger.CDebugf(ctx, "releasing vacuum (open)")
+	g.pauseKeepalive()
+	defer g.resumeKeepalive()
 
 	// In advanced mode, POS >= 100 sends a release command.
 	// Re-assert GTO around the change per the manual.
@@ -283,6 +286,8 @@ func (g *epickGripper) Grab(ctx context.Context, extra map[string]interface{}) (
 
 
 	g.logger.CDebugf(ctx, "activating vacuum (grab)")
+	g.pauseKeepalive()
+	defer g.resumeKeepalive()
 
 	// Use advanced mode (MOD=1) with continuous vacuum (POS=0, SPE=0).
 	// Automatic mode has a built-in ~2s timeout that shuts off the pump,
@@ -509,9 +514,31 @@ func (g *epickGripper) keepalive(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_, _ = g.Get("ACT")
+			g.mu.Lock()
+			paused := g.keepalivePaused
+			g.mu.Unlock()
+			if !paused {
+				_, _ = g.Get("ACT")
+			}
 		}
 	}
+}
+
+// pauseKeepalive stops the keepalive from polling. Caller must hold no locks.
+func (g *epickGripper) pauseKeepalive() {
+	g.mu.Lock()
+	g.keepalivePaused = true
+	g.mu.Unlock()
+	// Wait for any in-flight keepalive poll to finish.
+	// The mutex in Send() ensures this.
+	time.Sleep(50 * time.Millisecond)
+}
+
+// resumeKeepalive restarts keepalive polling.
+func (g *epickGripper) resumeKeepalive() {
+	g.mu.Lock()
+	g.keepalivePaused = false
+	g.mu.Unlock()
 }
 
 func (g *epickGripper) waitForObject(ctx context.Context, target int, timeout time.Duration) error {
