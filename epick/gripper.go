@@ -277,12 +277,19 @@ func (g *epickGripper) Grab(ctx context.Context, extra map[string]interface{}) (
 		return false, fmt.Errorf("grip failed: %w", err)
 	}
 
-	// Non-blocking mode: return immediately after activating vacuum.
-	if nb, ok := extra["non_blocking"]; ok {
-		if b, ok := nb.(bool); ok && b {
-			g.logger.CDebugf(ctx, "non-blocking grab: vacuum activated, returning immediately")
-			return false, nil
+	// Default: return immediately after activating vacuum (non-blocking).
+	// The caller should use IsHoldingSomething() to verify the seal after
+	// the arm descends onto the workpiece.
+	// Pass extra["blocking"] = true to wait for object detection before returning.
+	blocking := false
+	if b, ok := extra["blocking"]; ok {
+		if v, ok := b.(bool); ok && v {
+			blocking = true
 		}
+	}
+	if !blocking {
+		g.logger.CDebugf(ctx, "vacuum activated, returning immediately (non-blocking)")
+		return false, nil
 	}
 
 	// Blocking mode: wait for object detection or timeout.
