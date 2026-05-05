@@ -268,7 +268,7 @@ func (g *epickGripper) Grab(ctx context.Context, extra map[string]interface{}) (
 	// POS < 100 = grip command. Lower value = stronger vacuum.
 	// In automatic mode, any value < 100 triggers auto grip.
 	// In advanced mode, POS = 100 - max_vacuum_pct.
-	gripVal := "22" // Default: ~78% vacuum (max device vacuum)
+	gripVal := "0" // Default: continuous vacuum (generator always ON, best for porous materials)
 	if g.conf.Mode == "advanced" && g.conf.MaxPressurePct != 0 {
 		gripVal = strconv.Itoa(100 - g.conf.MaxPressurePct)
 	}
