@@ -255,6 +255,10 @@ func (g *epickGripper) Open(ctx context.Context, extra map[string]interface{}) e
 }
 
 // Grab activates vacuum and returns whether an object was detected.
+// Pass extra["non_blocking"] = true to turn on vacuum and return immediately
+// without waiting for object detection. Useful when the arm still needs to
+// descend onto the workpiece after vacuum is enabled — check IsHoldingSomething()
+// later to verify the seal.
 func (g *epickGripper) Grab(ctx context.Context, extra map[string]interface{}) (bool, error) {
 	ctx, done := g.opMgr.New(ctx)
 	defer done()
@@ -273,7 +277,15 @@ func (g *epickGripper) Grab(ctx context.Context, extra map[string]interface{}) (
 		return false, fmt.Errorf("grip failed: %w", err)
 	}
 
-	// Wait for object detection or timeout.
+	// Non-blocking mode: return immediately after activating vacuum.
+	if nb, ok := extra["non_blocking"]; ok {
+		if b, ok := nb.(bool); ok && b {
+			g.logger.CDebugf(ctx, "non-blocking grab: vacuum activated, returning immediately")
+			return false, nil
+		}
+	}
+
+	// Blocking mode: wait for object detection or timeout.
 	timeoutMs := 5000
 	if g.conf.TimeoutMs != 0 {
 		timeoutMs = g.conf.TimeoutMs + 2000
@@ -281,7 +293,6 @@ func (g *epickGripper) Grab(ctx context.Context, extra map[string]interface{}) (
 	_ = g.waitForGrip(ctx, time.Duration(timeoutMs)*time.Millisecond)
 
 	// Give the EPick a moment to settle, then check final state.
-	// In automatic mode the EPick may still be transitioning to holding mode.
 	if !utils.SelectContextOrWait(ctx, 500*time.Millisecond) {
 		return false, ctx.Err()
 	}
