@@ -286,6 +286,15 @@ func (g *epickGripper) Grab(ctx context.Context, extra map[string]interface{}) (
 	if err := g.Set("SPE", "0"); err != nil { // No timeout
 		return false, fmt.Errorf("grip failed: %w", err)
 	}
+	// Set min pressure threshold low for porous materials.
+	// FOR = 100 - min_pct. 90 = 10% vacuum triggers object detection.
+	forVal := "90"
+	if g.conf.MinPressurePct != 0 {
+		forVal = strconv.Itoa(100 - g.conf.MinPressurePct)
+	}
+	if err := g.Set("FOR", forVal); err != nil {
+		return false, fmt.Errorf("grip failed: %w", err)
+	}
 	if err := g.Set("GTO", "1"); err != nil {
 		return false, fmt.Errorf("grip failed: %w", err)
 	}
@@ -326,22 +335,18 @@ func (g *epickGripper) Grab(ctx context.Context, extra map[string]interface{}) (
 }
 
 // IsHoldingSomething checks whether the gripper is currently holding an object.
+// In continuous vacuum mode (POS=0), OBJ may stay at 0 (regulating) even when
+// an object is held, since the target vacuum level is never "reached". So we
+// also check actual pressure — any vacuum below a threshold means something
+// is sealed against the cups.
 func (g *epickGripper) IsHoldingSomething(ctx context.Context, extra map[string]interface{}) (gripper.HoldingStatus, error) {
 	obj, err := g.getInt("OBJ")
 	if err != nil {
 		return gripper.HoldingStatus{}, err
 	}
 
-	holding := obj == 1 || obj == 2
 	meta := map[string]interface{}{
 		"object_status_raw": obj,
-	}
-
-	// Get actual pressure if available.
-	pos, posErr := g.getInt("POS")
-	if posErr == nil {
-		meta["pressure_register"] = pos
-		meta["pressure_kpa"] = pos - 100
 	}
 
 	switch obj {
@@ -353,6 +358,21 @@ func (g *epickGripper) IsHoldingSomething(ctx context.Context, extra map[string]
 		meta["object_status"] = "detected_max_vacuum"
 	case 3:
 		meta["object_status"] = "no_object"
+	}
+
+	// OBJ 1 or 2 = object detected by the EPick's own logic.
+	holding := obj == 1 || obj == 2
+
+	// In continuous mode, also check actual pressure.
+	// POS register: 100 = ambient (0 kPa), lower = more vacuum.
+	// If pressure is below 90 (~10 kPa vacuum), something is likely sealed.
+	pos, posErr := g.getInt("POS")
+	if posErr == nil {
+		meta["pressure_register"] = pos
+		meta["pressure_kpa"] = pos - 100
+		if pos < 90 {
+			holding = true
+		}
 	}
 
 	return gripper.HoldingStatus{
