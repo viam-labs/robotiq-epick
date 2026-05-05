@@ -265,15 +265,28 @@ func (g *epickGripper) Grab(ctx context.Context, extra map[string]interface{}) (
 
 	g.logger.CDebugf(ctx, "activating vacuum (grab)")
 
-	// POS < 100 = grip command. Lower value = stronger vacuum.
-	// In automatic mode, any value < 100 triggers auto grip.
-	// In advanced mode, POS = 100 - max_vacuum_pct.
-	gripVal := "0" // Default: continuous vacuum (generator always ON, best for porous materials)
+	// Use advanced mode (MOD=1) with continuous vacuum (POS=0, SPE=0).
+	// Automatic mode has a built-in ~2s timeout that shuts off the pump,
+	// which doesn't work for porous materials or vacuum-before-descend workflows.
+	// Advanced mode with POS=0 keeps the pump running indefinitely.
+	if err := g.Set("GTO", "0"); err != nil {
+		return false, fmt.Errorf("grip failed: %w", err)
+	}
+	if err := g.Set("MOD", "1"); err != nil {
+		return false, fmt.Errorf("grip failed: %w", err)
+	}
+
+	gripVal := "0" // Continuous vacuum (generator always ON)
 	if g.conf.Mode == "advanced" && g.conf.MaxPressurePct != 0 {
 		gripVal = strconv.Itoa(100 - g.conf.MaxPressurePct)
 	}
-
 	if err := g.Set("POS", gripVal); err != nil {
+		return false, fmt.Errorf("grip failed: %w", err)
+	}
+	if err := g.Set("SPE", "0"); err != nil { // No timeout
+		return false, fmt.Errorf("grip failed: %w", err)
+	}
+	if err := g.Set("GTO", "1"); err != nil {
 		return false, fmt.Errorf("grip failed: %w", err)
 	}
 
