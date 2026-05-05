@@ -42,15 +42,11 @@ Add the **module** (or search for `robotiq-epick` in the registry):
 }
 ```
 
-Add the **gripper component** with a frame parented to the arm:
-
-### Automatic mode (default)
-
-The gripper automatically detects vacuum levels, timeout, and hysteresis. It will grip for ~2 seconds and then hold indefinitely once an object is detected.
+Add the **gripper component** with a frame parented to the arm. The `translation.z: 196` sets the TCP (tool center point) at the suction cup tips, 196mm from the flange:
 
 ```json
 {
-  "name": "epick",
+  "name": "vacuum_gripper",
   "model": "shrews-testing:robotiq:epick",
   "type": "gripper",
   "namespace": "rdk",
@@ -59,31 +55,16 @@ The gripper automatically detects vacuum levels, timeout, and hysteresis. It wil
   },
   "depends_on": [],
   "frame": {
-    "parent": "arm"
-  }
-}
-```
-
-### Advanced mode
-
-User sets desired vacuum levels and timeout. Best for consistent production behavior.
-
-```json
-{
-  "name": "epick",
-  "model": "shrews-testing:robotiq:epick",
-  "type": "gripper",
-  "namespace": "rdk",
-  "attributes": {
-    "host": "10.1.0.84",
-    "mode": "advanced",
-    "max_pressure_pct": 60,
-    "min_pressure_pct": 40,
-    "timeout_ms": 3000
-  },
-  "depends_on": [],
-  "frame": {
-    "parent": "arm"
+    "parent": "arm",
+    "translation": {
+      "x": 0,
+      "y": 0,
+      "z": 196
+    },
+    "orientation": {
+      "type": "ov_degrees",
+      "value": { "x": 0, "y": 0, "z": 1, "th": 0 }
+    }
   }
 }
 ```
@@ -94,41 +75,40 @@ User sets desired vacuum levels and timeout. Best for consistent production beha
 |------|------|----------|---------|-------------|
 | `host` | string | **Yes** | - | UR controller IP address |
 | `port` | int | No | `63352` | URCap socket port |
-| `mode` | string | No | `"automatic"` | `"automatic"` or `"advanced"` |
-| `max_pressure_pct` | int | No | `60` | Maximum vacuum level (20-100%), advanced mode |
-| `min_pressure_pct` | int | No | `40` | Minimum vacuum level (10-100%), advanced mode |
-| `timeout_ms` | int | No | `3000` | Grip timeout in ms, advanced mode |
+| `mode` | string | No | `"automatic"` | Config-level mode hint (Grab always uses advanced mode internally) |
+| `max_pressure_pct` | int | No | `60` | Maximum vacuum level (20-100%), when mode is "advanced" |
+| `min_pressure_pct` | int | No | `40` | Minimum vacuum level (10-100%), when mode is "advanced" |
+| `timeout_ms` | int | No | `3000` | Grip timeout in ms, when mode is "advanced" |
 
 ## Frame and Collision Geometry
 
-The module returns a kinematic model via `Kinematics()` that defines both the collision geometry and the tool center point (TCP). No `translation` is needed in the frame config — just set `parent: "arm"`.
+The frame `translation.z: 196` places the gripper's origin at the **suction cup tips** (196mm from the flange). This is the TCP — the point the motion planner targets when you call `motion.Move`.
+
+The module returns collision geometry via `Kinematics()` positioned at **negative Z** from the TCP (back toward the flange):
 
 ```
-    UR Arm Flange (Z=0)
-    ━━━━━━━━━━━━━━━━━━━━
+         TCP (Z=0)           <-- gripper frame origin (cup tips)
+    ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄       motion planner targets poses here
     │                    │
-    │  ┌──────────────┐  │
-    │  │   Capsule     │  │  Z=0 to Z=70mm
-    │  │  68mm dia     │  │  EPick body
-    │  │  (collision)  │  │
-    │  └──────────────┘  │
+    │    ~ clearance ~   │  Z=0 to Z=-26mm (no collision)
     │                    │
     │ ┌────────────────┐ │
     │ │                │ │
-    │ │     Box        │ │  Z=70 to Z=170mm
-    │ │  230 x 150mm   │ │  Bracket + hoses
-    │ │  (collision)   │ │
+    │ │     Box        │ │  Z=-26 to Z=-126mm
+    │ │  230 x 150mm   │ │  Bracket + hoses (collision)
     │ │                │ │
     │ └────────────────┘ │
-    │                    │  Z=170 to Z=196mm
-    │    ~ clearance ~   │  No collision (allows approach)
     │                    │
-    ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
-         TCP (Z=196mm)      <-- planner targets poses here
-        Suction cup tips
+    │  ┌──────────────┐  │
+    │  │   Capsule     │  │  Z=-126 to Z=-196mm
+    │  │  68mm dia     │  │  EPick body (collision)
+    │  └──────────────┘  │
+    │                    │
+    ━━━━━━━━━━━━━━━━━━━━
+    UR Arm Flange (Z=-196)
 ```
 
-The collision geometry is intentionally undersized (stops at Z=170mm) so the motion planner allows the suction cups to reach the workpiece surface. The 26mm clearance between the collision boundary and TCP ensures the planner won't reject valid pick/place approaches.
+The 26mm clearance between the collision boundary and the TCP ensures the planner allows the cups to approach surfaces. Other modules that attach geometry to this gripper frame (e.g. a held box) place it at the TCP origin — at the cup tips, where the box actually is.
 
 **Dimensions based on actual measurements:**
 - EPick body: ~75mm diameter, 70mm tall
@@ -143,14 +123,22 @@ Implements the standard [Viam gripper API](https://docs.viam.com/dev/reference/a
 | Method | EPick Behavior |
 |--------|---------------|
 | `Open` | Releases vacuum (opens release valve) |
-| `Grab` | Activates vacuum, returns `true` if object detected |
-| `IsHoldingSomething` | Checks suction status with pressure metadata |
+| `Grab` | Activates vacuum (non-blocking by default, returns immediately) |
+| `IsHoldingSomething` | Checks OBJ register + actual pressure for seal detection |
 | `Stop` | Stops vacuum regulation |
 | `IsMoving` | Returns `true` if an operation is in progress |
 
-### Automatic mode behavior
+### Grab behavior
 
-In automatic mode, `Grab` activates the vacuum generator for ~2 seconds. If an object is detected (sufficient vacuum reached), the EPick switches to **holding mode** and maintains vacuum indefinitely until `Open` is called. If no object is detected within the timeout, it stops and reports `success: false`.
+`Grab()` is **non-blocking by default** — it turns on the vacuum and returns immediately. This is the right workflow for vacuum grippers where the arm still needs to descend onto the workpiece after vacuum is enabled. Use `IsHoldingSomething()` after contact to verify the seal.
+
+Pass `extra["blocking"] = true` for the old behavior (wait up to 5 seconds for object detection).
+
+Internally, `Grab()` always switches to **advanced mode** with **continuous vacuum** (`POS=0`, `SPE=0`) so the pump runs indefinitely until `Open()` is called. This works well with porous materials like cardboard.
+
+### IsHoldingSomething
+
+Checks both the EPick's OBJ register (object detection flags) and actual pressure. In continuous vacuum mode, OBJ may stay at 0 (regulating) even when holding an object, so the pressure fallback (any vacuum >10 kPa) ensures detection works for porous materials.
 
 ### DoCommand
 
@@ -171,9 +159,15 @@ Available registers: `ACT`, `MOD`, `GTO`, `STA`, `OBJ`, `FLT`, `POS`, `SPE`, `FO
 {"set": {"MOD": "1", "POS": "22", "GTO": "1"}}
 ```
 
-## Communication Protocol
+## Communication Architecture
 
-This module uses the same socket-based text protocol as the [viam-modules/robotiq](https://github.com/viam-modules/robotiq) 2F gripper module. The Robotiq URCap exposes a TCP socket on port 63352 that accepts commands in the format:
+All socket I/O runs on a **single goroutine** (`ioLoop`). Commands from `Grab()`, `Open()`, `DoCommand()`, etc. are sent via a channel to the I/O goroutine, which sends them on the TCP socket and returns the response. A **keepalive** (`GET ACT`) fires every 500ms on the same goroutine to prevent EPick fault 0x9 (communication timeout after 1 second of silence). The keepalive timer resets after every real command, so it only fires during idle periods.
+
+This lockless design eliminates response interleaving — the keepalive and API commands can never overlap on the socket.
+
+### Protocol
+
+The Robotiq URCap exposes a TCP socket on port 63352:
 
 ```
 SET <register> <value>\r\n  ->  "ack"
@@ -187,8 +181,8 @@ GET <register>\r\n          ->  "<register> <value>"
 | `ACT` | Activate (0/1) | Activation echo | Gripper activation |
 | `MOD` | Mode (0=auto, 1=advanced) | Mode echo | Operating mode |
 | `GTO` | Regulate (0/1) | Regulate echo | Enable vacuum regulation |
-| `POS` | Pressure request (0-255) | Actual pressure | 0-99=grip, 100+=release |
-| `SPE` | Grip timeout (0-255) | - | Each unit = 100ms |
+| `POS` | Pressure request (0-255) | Actual pressure | 0=continuous, 1-99=grip, 100+=release |
+| `SPE` | Grip timeout (0-255) | - | Each unit = 100ms, 0=no timeout |
 | `FOR` | Min pressure (0-255) | - | Minimum vacuum threshold |
 | `OBJ` | - | Object status (0-3) | 0=regulating, 1=min, 2=max, 3=none |
 | `STA` | - | Activation status | 0=not activated, 3=operational |
@@ -202,11 +196,14 @@ Port 63352 may be blocked by the UR's security settings. Check **Settings** > **
 ### "model not registered" error
 Ensure both the module AND the gripper component are in the config. The module must be added separately from the component.
 
-### Grab returns false but object is held
-In automatic mode, the EPick's initial grip phase is ~2 seconds. Ensure the object is already in contact with the suction cup when `Grab` is called.
+### Vacuum doesn't start / fault code 7
+The gripper lost activation (ACT=0). This can happen after a protective stop or URCap reset. The module re-asserts ACT=1 on every Grab/Open call, so retrying should work. If it persists, check the pendant for safety faults.
 
-### Fault code 6 after grab
-This is "grip timeout" -- the EPick tried to grip but couldn't detect an object within the timeout. The object may not have been sealed against the cup, or there's an air leak.
+### Vacuum turns off mid-move
+Usually caused by the EPick communication timeout (fault 0x9) — the keepalive should prevent this. If it still happens, check network stability to the UR controller. A protective stop also cuts tool power.
+
+### Weak suction on cardboard
+The module uses continuous vacuum mode (POS=0, pump always ON). If suction is still weak, check that all suction cups have good contact and no air leaks around the edges.
 
 ## Building
 
