@@ -26,6 +26,10 @@ func mainWithArgs(ctx context.Context, args []string, logger logging.Logger) err
 		return err
 	}
 
+	if err = mod.AddModelFromRegistry(ctx, gripper.API, epick.SimModel); err != nil {
+		return err
+	}
+
 	err = mod.Start(ctx)
 	defer mod.Close(ctx)
 	if err != nil {
