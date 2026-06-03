@@ -80,6 +80,52 @@ Add the **gripper component** with a frame parented to the arm. The `translation
 | `min_pressure_pct` | int | No | `40` | Minimum vacuum level (10-100%), when mode is "advanced" |
 | `timeout_ms` | int | No | `3000` | Grip timeout in ms, when mode is "advanced" |
 
+## Simulated gripper (no hardware)
+
+The `shrews-testing:robotiq:simulated-epick-vacuum-gripper` model implements the same
+gripper API **without any hardware or network connection** — useful for developing and
+testing motion plans and gripper-driven state machines (e.g. a palletizer's vacuum step)
+before deploying to a real robot. It reuses the real EPick's kinematic model and collision
+geometry, so poses and collision checking behave identically.
+
+Holding behavior is time-driven:
+
+- **`Grab()`** (engage vacuum) — `IsHoldingSomething()` returns `true` after an adjustable
+  delay (`hold_delay_ms`), simulating vacuum buildup / object detection latency.
+- **`Open()`** (release) — `IsHoldingSomething()` returns `false` immediately.
+
+```json
+{
+  "name": "vacuum_gripper",
+  "model": "shrews-testing:robotiq:simulated-epick-vacuum-gripper",
+  "type": "gripper",
+  "namespace": "rdk",
+  "attributes": {
+    "hold_delay_ms": 1000
+  },
+  "frame": {
+    "parent": "arm",
+    "translation": { "x": 0, "y": 0, "z": 196 },
+    "orientation": { "type": "ov_degrees", "value": { "x": 0, "y": 0, "z": 1, "th": 0 } }
+  }
+}
+```
+
+### Simulated attributes
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `hold_delay_ms` | int | No | `1000` | Delay after `Grab()` before `IsHoldingSomething()` reports `true` (≥ 0) |
+
+The delay is also adjustable at runtime via `DoCommand`:
+
+```json
+{"set_hold_delay_ms": 250}
+```
+
+`DoCommand({"get_status": true})` returns the simulated `grabbed`, `holding`, and
+`hold_delay_ms` state.
+
 ## Frame and Collision Geometry
 
 The frame `translation.z: 196` places the gripper's origin at the **suction cup tips** (196mm from the flange). This is the TCP — the point the motion planner targets when you call `motion.Move`.
@@ -165,6 +211,8 @@ All socket I/O runs on a **single goroutine** (`ioLoop`). Commands from `Grab()`
 
 This lockless design eliminates response interleaving — the keepalive and API commands can never overlap on the socket.
 
+**Auto-reconnect:** if a read or write fails (broken pipe, connection reset, read timeout) — for example because a protective stop or tool-power cycle reset the URCap socket — `ioLoop` transparently re-dials the URCap (with capped 200ms→2s backoff) and retries the command. A reconnect logs `reconnected to EPick URCap`. Without this, a single transient socket drop would take the gripper offline until viam-server restarted, with every subsequent `Grab()` returning `write: broken pipe`.
+
 ### Protocol
 
 The Robotiq URCap exposes a TCP socket on port 63352:
@@ -200,7 +248,7 @@ Ensure both the module AND the gripper component are in the config. The module m
 The gripper lost activation (ACT=0). This can happen after a protective stop or URCap reset. The module re-asserts ACT=1 on every Grab/Open call, so retrying should work. If it persists, check the pendant for safety faults.
 
 ### Vacuum turns off mid-move
-Usually caused by the EPick communication timeout (fault 0x9) — the keepalive should prevent this. If it still happens, check network stability to the UR controller. A protective stop also cuts tool power.
+Usually caused by the EPick communication timeout (fault 0x9) — the keepalive should prevent this. If it still happens, check network stability to the UR controller. A protective stop also cuts tool power and resets the URCap socket; the module auto-reconnects (look for `reconnected to EPick URCap` in the logs) and the next `Grab()` re-asserts `ACT=1`. Frequent reconnects point to a competing socket client — e.g. a UR program also running Robotiq gripper nodes — since the URCap socket itself accepts multiple clients.
 
 ### Weak suction on cardboard
 The module uses continuous vacuum mode (POS=0, pump always ON). If suction is still weak, check that all suction cups have good contact and no air leaks around the edges.

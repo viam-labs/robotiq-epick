@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/golang/geo/r3"
+	commonpb "go.viam.com/api/common/v1"
 	"go.viam.com/rdk/components/gripper"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/operation"
@@ -30,6 +32,9 @@ import (
 
 //go:embed epick_model.json
 var epickModelJSON []byte
+
+//go:embed epick_simplified.stl
+var epickSTL []byte
 
 // Model is the Viam model for the Robotiq EPick vacuum gripper.
 var Model = resource.NewModel("shrews-testing", "robotiq", "epick")
@@ -85,7 +90,9 @@ type epickGripper struct {
 	conf     *Config
 	logger   logging.Logger
 	opMgr    *operation.SingleOperationManager
+	addr     string             // URCap socket address, for reconnects
 	requests chan socketRequest // all socket I/O funnels through here
+	quit     chan struct{}      // closed by Close to signal shutdown
 	done     chan struct{}      // closed when the I/O goroutine exits
 }
 
@@ -117,7 +124,9 @@ func newEPickGripper(
 		conf:     cfg,
 		logger:   logger,
 		opMgr:    operation.NewSingleOperationManager(),
+		addr:     addr,
 		requests: make(chan socketRequest),
+		quit:     make(chan struct{}),
 		done:     make(chan struct{}),
 	}
 
@@ -126,7 +135,7 @@ func newEPickGripper(
 	go g.ioLoop(conn)
 
 	if err := g.activate(ctx); err != nil {
-		close(g.requests) // signal ioLoop to exit
+		close(g.quit) // signal ioLoop to exit
 		<-g.done
 		return nil, fmt.Errorf("failed to activate EPick: %w", err)
 	}
@@ -136,32 +145,79 @@ func newEPickGripper(
 
 // ioLoop runs on a single goroutine. It owns the socket and handles
 // all send/receive plus keepalive. No locks needed.
+//
+// If a write or read fails — e.g. the URCap socket is reset by a protective
+// stop, a tool-power cycle, or the URCap re-establishing its link to the
+// EPick — the connection is transparently re-dialed and the command retried,
+// so a transient drop doesn't take the gripper offline until a restart.
 func (g *epickGripper) ioLoop(conn net.Conn) {
 	defer close(g.done)
-	defer conn.Close()
+	defer func() {
+		if conn != nil {
+			conn.Close()
+		}
+	}()
 
 	buf := make([]byte, 128)
 	keepalive := time.NewTicker(500 * time.Millisecond)
 	defer keepalive.Stop()
 
+	// dial re-establishes the socket with capped backoff after a drop.
+	// Returns false if Close() fires before a connection is re-established.
+	dial := func() bool {
+		backoff := 200 * time.Millisecond
+		for {
+			c, err := net.Dial("tcp", g.addr)
+			if err == nil {
+				g.logger.Infof("reconnected to EPick URCap at %s", g.addr)
+				conn = c
+				return true
+			}
+			g.logger.Warnf("reconnect to %s failed: %v; retrying in %v", g.addr, err, backoff)
+			select {
+			case <-g.quit:
+				return false
+			case <-time.After(backoff):
+			}
+			if backoff < 2*time.Second {
+				backoff *= 2
+			}
+		}
+	}
+
+	// send writes a command and reads the reply, reconnecting and retrying
+	// on a connection-level failure (broken pipe, reset, read timeout).
 	send := func(msg string) (string, error) {
-		if _, err := conn.Write([]byte(msg)); err != nil {
-			return "", err
+		for attempt := 0; attempt < 3; attempt++ {
+			if conn == nil {
+				if !dial() {
+					return "", fmt.Errorf("connection closed")
+				}
+			}
+			if _, err := conn.Write([]byte(msg)); err != nil {
+				g.logger.Warnf("socket write failed: %v; reconnecting", err)
+				conn.Close()
+				conn = nil
+				continue
+			}
+			conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			n, err := conn.Read(buf)
+			if err != nil {
+				g.logger.Warnf("socket read failed: %v; reconnecting", err)
+				conn.Close()
+				conn = nil
+				continue
+			}
+			return strings.TrimSpace(string(buf[:n])), nil
 		}
-		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-		n, err := conn.Read(buf)
-		if err != nil {
-			return "", err
-		}
-		return strings.TrimSpace(string(buf[:n])), nil
+		return "", fmt.Errorf("socket command %q failed after reconnect attempts", strings.TrimSpace(msg))
 	}
 
 	for {
 		select {
-		case req, ok := <-g.requests:
-			if !ok {
-				return // channel closed, shut down
-			}
+		case <-g.quit:
+			return // Close() called, shut down
+		case req := <-g.requests:
 			data, err := send(req.msg)
 			req.resp <- socketResponse{data, err}
 
@@ -428,17 +484,22 @@ func (g *epickGripper) IsMoving(ctx context.Context) (bool, error) {
 	return g.opMgr.OpRunning(), nil
 }
 
-// Geometries returns collision geometry from the embedded kinematic model.
+// Geometries returns the EPick's collision geometry as an STL mesh.
+// The mesh is positioned relative to the TCP origin (Z=0 at cup tips).
+// The STL is exported from Onshape with Z=0 at the flange, so we offset
+// by -196mm to place it correctly in the gripper frame.
 func (g *epickGripper) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
-	model, err := g.Kinematics(ctx)
+	// Offset: STL has Z=0 at flange, but our frame origin is at TCP (Z=-196 from flange).
+	pose := spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: -196})
+	mesh, err := spatialmath.NewMeshFromProto(
+		pose,
+		&commonpb.Mesh{ContentType: "stl", Mesh: epickSTL},
+		g.Name().ShortName(),
+	)
 	if err != nil {
-		return nil, nil
+		return nil, err
 	}
-	gif, err := model.Geometries([]referenceframe.Input{})
-	if err != nil {
-		return nil, nil
-	}
-	return gif.Geometries(), nil
+	return []spatialmath.Geometry{mesh}, nil
 }
 
 // Kinematics returns the embedded kinematic model (collision geometry + TCP offset).
@@ -496,7 +557,7 @@ func (g *epickGripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 // Close shuts down the I/O goroutine and disconnects.
 func (g *epickGripper) Close(ctx context.Context) error {
 	g.logger.CInfof(ctx, "closing EPick connection")
-	close(g.requests)
+	close(g.quit)
 	<-g.done
 	return nil
 }

@@ -23,12 +23,22 @@ API callers (Grab, Open, etc.)
 ```
 
 - `Send()` pushes a `socketRequest` onto the channel and blocks on the response channel.
-- `ioLoop` selects between incoming requests and a 500ms keepalive ticker.
+- `ioLoop` selects between incoming requests, a 500ms keepalive ticker, and a `quit` channel.
 - Keepalive timer resets after every real command — no redundant polls during active use.
-- `Close()` closes the requests channel, ioLoop exits, conn closes.
+- `Close()` closes the `quit` channel, ioLoop exits, conn closes.
 
 This design eliminates the "ackACT 1" merged response bug that occurred when a mutex-based
 keepalive's GET ACT response collided with a SET ack in the TCP read buffer.
+
+### Auto-reconnect on socket drop
+If a write or read fails (broken pipe / reset / read timeout), `ioLoop` re-dials `g.addr`
+with capped backoff (200ms → 2s) and retries the command (up to 3 attempts). This is needed
+because the URCap socket gets reset by the UR side on protective stops, tool-power cycles, or
+when the URCap re-establishes its link to the EPick. Without reconnect, the first such drop
+took the gripper offline until a viam-server restart — every subsequent `Grab()` wrote to a
+dead socket and returned `write: broken pipe`. A reconnect logs `reconnected to EPick URCap`;
+frequent occurrences point to a competing master (e.g. a UR program running Robotiq gripper
+nodes), since the URCap socket itself is multi-client (verified: parallel clients coexist).
 
 ### Communication protocol
 Uses the Robotiq URCap socket protocol (TCP port 63352) — same text protocol as
@@ -50,11 +60,23 @@ control flow. Zero shared code.
 
 ## Key files
 
-- `main.go` — module entry point
+- `main.go` — module entry point (registers both `epick` and `simulated-epick-vacuum-gripper`)
 - `epick/gripper.go` — all gripper logic: ioLoop, Grab, Open, Kinematics, DoCommand
+- `epick/simulated.go` — simulated gripper model (no hardware), see below
+- `epick/simulated_test.go` — unit tests for the simulated model's hold-delay behavior
 - `epick/epick_model.json` — embedded kinematic model (collision geometry + TCP offset)
 - `epick/registers.go` — EPick register constants (reference, not used at runtime)
 - `meta.json` — Viam module manifest
+
+## Simulated model
+
+`shrews-testing:robotiq:simulated-epick-vacuum-gripper` (`epick/simulated.go`) implements the
+gripper API with no hardware/socket — for testing motion plans and gripper state machines.
+It reuses the embedded `epick_model.json` + STL, so kinematics and collision geometry match
+the real model. Holding is time-driven: `Grab()` records the grab time and
+`IsHoldingSomething()` returns true once `hold_delay_ms` (default 1000, adjustable via config
+or `DoCommand({"set_hold_delay_ms": N})`) has elapsed; `Open()`/`Stop()` clear it immediately.
+Shares the package-level embedded `epickModelJSON`/`epickSTL` vars with `gripper.go`.
 
 ## Vacuum control design
 
@@ -97,6 +119,14 @@ Two collision geometries at negative Z from the TCP:
 
 ## Hardware setup (tested)
 
+Current deployment (palletizing1):
+- UR7e at 192.168.1.3
+- viam-server host `palletizing1` at 192.168.1.2
+- EPick connected through UR tool connector
+- URCap socket on 63352 verified reachable and multi-client (two parallel `nc` clients coexist)
+- (firmware / serial / URCap version / machine ID on this robot: TBD — confirm on pendant)
+
+Original bench setup (UR5):
 - UR5 at 10.1.0.84, firmware 5.22.1, serial 20255700195
 - EPick with 4 suction cups connected through UR tool connector
 - Robotiq Grippers URCap v3.41.0
@@ -111,8 +141,10 @@ Two collision geometries at negative Z from the TCP:
 - VAS register is not supported by the Grippers URCap (returns "?").
 - Cardboard (porous): continuous vacuum compensates for air leakage. IsHoldingSomething
   uses pressure fallback since OBJ detection may not trigger.
-- Protective stop on UR cuts tool power → vacuum drops → EPick deactivates.
-  Module recovers on next Grab() via ACT=1 re-assertion.
+- Protective stop on UR cuts tool power → vacuum drops → EPick deactivates, and the URCap
+  often resets the 63352 socket. The ioLoop auto-reconnects the socket, then the next Grab()
+  recovers gripper state via ACT=1 re-assertion. (ACT=1 alone can't recover a dead socket —
+  the write fails first; reconnect must happen at the socket layer, which it now does.)
 - The palletizer module uses `ComponentName: gripper` for motion.Move and
   `motion.GetPose(gripper, world)` for position — both compose the frame offset correctly.
 
