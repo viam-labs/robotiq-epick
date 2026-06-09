@@ -91,7 +91,7 @@ geometry, so poses and collision checking behave identically.
 Holding behavior is time-driven:
 
 - **`Grab()`** (engage vacuum) — `IsHoldingSomething()` returns `true` after an adjustable
-  delay (`hold_delay_ms`), simulating vacuum buildup / object detection latency.
+  delay (`grab_delay_ms`), simulating vacuum buildup / object detection latency.
 - **`Open()`** (release) — `IsHoldingSomething()` returns `false` immediately.
 
 ```json
@@ -101,7 +101,7 @@ Holding behavior is time-driven:
   "type": "gripper",
   "namespace": "rdk",
   "attributes": {
-    "hold_delay_ms": 1000
+    "grab_delay_ms": 1000
   },
   "frame": {
     "parent": "arm",
@@ -115,16 +115,16 @@ Holding behavior is time-driven:
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `hold_delay_ms` | int | No | `1000` | Delay after `Grab()` before `IsHoldingSomething()` reports `true` (≥ 0) |
+| `grab_delay_ms` | int | No | `1000` | Delay after `Grab()` before `IsHoldingSomething()` reports `true` (≥ 0). Omit or set `0` to use the default of `1000`. |
 
 The delay is also adjustable at runtime via `DoCommand`:
 
 ```json
-{"set_hold_delay_ms": 250}
+{"set_grab_delay_ms": 250}
 ```
 
 `DoCommand({"get_status": true})` returns the simulated `grabbed`, `holding`, and
-`hold_delay_ms` state.
+`grab_delay_ms` state.
 
 ## Frame and Collision Geometry
 

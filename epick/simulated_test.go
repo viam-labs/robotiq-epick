@@ -15,7 +15,7 @@ func newTestSimGripper(t *testing.T, delay time.Duration) *simGripper {
 	return &simGripper{
 		logger:    logging.NewTestLogger(t),
 		opMgr:     operation.NewSingleOperationManager(),
-		holdDelay: delay,
+		grabDelay: delay,
 	}
 }
 
@@ -26,7 +26,7 @@ func isHolding(t *testing.T, g *simGripper) bool {
 	return st.IsHoldingSomething
 }
 
-func TestSimGripperHoldDelay(t *testing.T) {
+func TestSimGripperGrabDelay(t *testing.T) {
 	ctx := context.Background()
 	g := newTestSimGripper(t, 100*time.Millisecond)
 
@@ -75,9 +75,9 @@ func TestSimGripperDoCommandSetDelay(t *testing.T) {
 	ctx := context.Background()
 	g := newTestSimGripper(t, time.Second)
 
-	resp, err := g.DoCommand(ctx, map[string]interface{}{"set_hold_delay_ms": float64(20)})
+	resp, err := g.DoCommand(ctx, map[string]interface{}{"set_grab_delay_ms": float64(20)})
 	test.That(t, err, test.ShouldBeNil)
-	test.That(t, resp["hold_delay_ms"], test.ShouldEqual, float64(20))
+	test.That(t, resp["grab_delay_ms"], test.ShouldEqual, float64(20))
 
 	_, err = g.Grab(ctx, nil)
 	test.That(t, err, test.ShouldBeNil)

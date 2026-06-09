@@ -74,8 +74,8 @@ control flow. Zero shared code.
 gripper API with no hardware/socket — for testing motion plans and gripper state machines.
 It reuses the embedded `epick_model.json` + STL, so kinematics and collision geometry match
 the real model. Holding is time-driven: `Grab()` records the grab time and
-`IsHoldingSomething()` returns true once `hold_delay_ms` (default 1000, adjustable via config
-or `DoCommand({"set_hold_delay_ms": N})`) has elapsed; `Open()`/`Stop()` clear it immediately.
+`IsHoldingSomething()` returns true once `grab_delay_ms` (default 1000, adjustable via config
+or `DoCommand({"set_grab_delay_ms": N})`) has elapsed; `Open()`/`Stop()` clear it immediately.
 Shares the package-level embedded `epickModelJSON`/`epickSTL` vars with `gripper.go`.
 
 ## Vacuum control design

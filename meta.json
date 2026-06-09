@@ -15,7 +15,7 @@
       "api": "rdk:component:gripper",
       "model": "shrews-testing:robotiq:simulated-epick-vacuum-gripper",
       "markdown_link": "README.md#configure-your-epick-gripper",
-      "short_description": "Simulated EPick vacuum gripper (no hardware) with adjustable hold delay"
+      "short_description": "Simulated EPick vacuum gripper (no hardware) with adjustable grab delay"
     }
   ],
   "build": {

@@ -7,7 +7,7 @@
 //
 // Holding behavior:
 //   - Grab()  ("close" / engage vacuum): IsHoldingSomething() becomes true after
-//     an adjustable delay (hold_delay_ms), simulating vacuum buildup / detection.
+//     an adjustable delay (grab_delay_ms), simulating vacuum buildup / detection.
 //   - Open()  (release): IsHoldingSomething() becomes false immediately.
 package epick
 
@@ -31,21 +31,21 @@ import (
 // SimModel is the Viam model for the simulated EPick vacuum gripper.
 var SimModel = resource.NewModel("shrews-testing", "robotiq", "simulated-epick-vacuum-gripper")
 
-// defaultHoldDelayMs is the delay after Grab() before IsHoldingSomething()
+// defaultGrabDelayMs is the delay after Grab() before IsHoldingSomething()
 // reports true, simulating vacuum buildup. Adjustable via config or DoCommand.
-const defaultHoldDelayMs = 1000
+const defaultGrabDelayMs = 1000
 
 // SimConfig configures the simulated gripper.
 type SimConfig struct {
-	// HoldDelayMs is the delay after Grab() before IsHoldingSomething() returns
-	// true. 0 uses defaultHoldDelayMs; set explicitly (including a small value)
+	// GrabDelayMs is the delay after Grab() before IsHoldingSomething() returns
+	// true. 0 uses defaultGrabDelayMs; set explicitly (including a small value)
 	// to simulate faster/slower vacuum buildup.
-	HoldDelayMs int `json:"hold_delay_ms,omitempty"`
+	GrabDelayMs int `json:"grab_delay_ms,omitempty"`
 }
 
 func (cfg *SimConfig) Validate(path string) ([]string, []string, error) {
-	if cfg.HoldDelayMs < 0 {
-		return nil, nil, fmt.Errorf("hold_delay_ms must be >= 0, got %d", cfg.HoldDelayMs)
+	if cfg.GrabDelayMs < 0 {
+		return nil, nil, fmt.Errorf("grab_delay_ms must be >= 0, got %d", cfg.GrabDelayMs)
 	}
 	return nil, nil, nil
 }
@@ -63,7 +63,7 @@ type simGripper struct {
 	opMgr  *operation.SingleOperationManager
 
 	mu        sync.Mutex
-	holdDelay time.Duration
+	grabDelay time.Duration
 	// grabbedAt is when Grab() was last called; zero when released (not holding).
 	grabbedAt time.Time
 }
@@ -79,18 +79,18 @@ func newSimGripper(
 		return nil, err
 	}
 
-	delayMs := cfg.HoldDelayMs
+	delayMs := cfg.GrabDelayMs
 	if delayMs == 0 {
-		delayMs = defaultHoldDelayMs
+		delayMs = defaultGrabDelayMs
 	}
 
 	g := &simGripper{
 		Named:     conf.ResourceName().AsNamed(),
 		logger:    logger,
 		opMgr:     operation.NewSingleOperationManager(),
-		holdDelay: time.Duration(delayMs) * time.Millisecond,
+		grabDelay: time.Duration(delayMs) * time.Millisecond,
 	}
-	logger.CInfof(ctx, "simulated EPick gripper ready (hold delay %dms)", delayMs)
+	logger.CInfof(ctx, "simulated EPick gripper ready (grab delay %dms)", delayMs)
 	return g, nil
 }
 
@@ -103,7 +103,7 @@ func (g *simGripper) Grab(ctx context.Context, extra map[string]interface{}) (bo
 
 	g.mu.Lock()
 	g.grabbedAt = time.Now()
-	delay := g.holdDelay
+	delay := g.grabDelay
 	g.mu.Unlock()
 	g.logger.CDebugf(ctx, "sim grab: holding in %v", delay)
 
@@ -143,20 +143,20 @@ func (g *simGripper) holding() bool {
 	if g.grabbedAt.IsZero() {
 		return false
 	}
-	return time.Since(g.grabbedAt) >= g.holdDelay
+	return time.Since(g.grabbedAt) >= g.grabDelay
 }
 
 // IsHoldingSomething reports the simulated holding state.
 func (g *simGripper) IsHoldingSomething(ctx context.Context, extra map[string]interface{}) (gripper.HoldingStatus, error) {
 	g.mu.Lock()
 	grabbedAt := g.grabbedAt
-	delay := g.holdDelay
+	delay := g.grabDelay
 	g.mu.Unlock()
 
 	holding := !grabbedAt.IsZero() && time.Since(grabbedAt) >= delay
 	meta := map[string]interface{}{
 		"simulated":     true,
-		"hold_delay_ms": delay.Milliseconds(),
+		"grab_delay_ms": delay.Milliseconds(),
 		"grabbed":       !grabbedAt.IsZero(),
 	}
 	if !grabbedAt.IsZero() && !holding {
@@ -209,34 +209,34 @@ func (g *simGripper) GoToInputs(ctx context.Context, inputs ...[]referenceframe.
 	return nil
 }
 
-// DoCommand supports adjusting the hold delay at runtime and reading status.
+// DoCommand supports adjusting the grab delay at runtime and reading status.
 //
-//	{"set_hold_delay_ms": 250}  -> change the delay live
-//	{"get_status": true}        -> {grabbed, holding, hold_delay_ms}
+//	{"set_grab_delay_ms": 250}  -> change the delay live
+//	{"get_status": true}        -> {grabbed, holding, grab_delay_ms}
 func (g *simGripper) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
-	if raw, ok := cmd["set_hold_delay_ms"]; ok {
+	if raw, ok := cmd["set_grab_delay_ms"]; ok {
 		ms, ok := raw.(float64) // JSON numbers decode to float64
 		if !ok || ms < 0 {
-			return nil, fmt.Errorf("set_hold_delay_ms expects a non-negative number, got %v", raw)
+			return nil, fmt.Errorf("set_grab_delay_ms expects a non-negative number, got %v", raw)
 		}
 		g.mu.Lock()
-		g.holdDelay = time.Duration(ms) * time.Millisecond
+		g.grabDelay = time.Duration(ms) * time.Millisecond
 		g.mu.Unlock()
-		g.logger.CInfof(ctx, "sim hold delay set to %vms", ms)
-		return map[string]interface{}{"hold_delay_ms": ms}, nil
+		g.logger.CInfof(ctx, "sim grab delay set to %vms", ms)
+		return map[string]interface{}{"grab_delay_ms": ms}, nil
 	}
 	if _, ok := cmd["get_status"]; ok {
 		g.mu.Lock()
 		grabbedAt := g.grabbedAt
-		delay := g.holdDelay
+		delay := g.grabDelay
 		g.mu.Unlock()
 		return map[string]interface{}{
 			"grabbed":       !grabbedAt.IsZero(),
 			"holding":       !grabbedAt.IsZero() && time.Since(grabbedAt) >= delay,
-			"hold_delay_ms": delay.Milliseconds(),
+			"grab_delay_ms": delay.Milliseconds(),
 		}, nil
 	}
-	return nil, fmt.Errorf("unknown command, supported: set_hold_delay_ms, get_status")
+	return nil, fmt.Errorf("unknown command, supported: set_grab_delay_ms, get_status")
 }
 
 // Close shuts down the simulated gripper.
