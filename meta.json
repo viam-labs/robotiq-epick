@@ -1,19 +1,19 @@
 {
   "$schema": "https://dl.viam.dev/module.schema.json",
-  "module_id": "shrews-testing:robotiq-epick",
+  "module_id": "viam:robotiq-epick",
   "visibility": "public",
   "url": "https://github.com/viam-labs/robotiq-epick",
   "description": "Go module for Robotiq EPick vacuum gripper, compatible with Viam",
   "models": [
     {
       "api": "rdk:component:gripper",
-      "model": "shrews-testing:robotiq:epick",
+      "model": "viam:robotiq:epick",
       "markdown_link": "README.md#configure-your-epick-gripper",
       "short_description": "Driver for Robotiq EPick vacuum gripper via Robotiq URCap socket"
     },
     {
       "api": "rdk:component:gripper",
-      "model": "shrews-testing:robotiq:simulated-epick-vacuum-gripper",
+      "model": "viam:robotiq:simulated-epick-vacuum-gripper",
       "markdown_link": "README.md#configure-your-epick-gripper",
       "short_description": "Simulated EPick vacuum gripper (no hardware) with adjustable grab delay"
     }

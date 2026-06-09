@@ -36,8 +36,8 @@ Add the **module** (or search for `robotiq-epick` in the registry):
 ```json
 {
   "type": "registry",
-  "name": "shrews-testing_robotiq-epick",
-  "module_id": "shrews-testing:robotiq-epick",
+  "name": "viam_robotiq-epick",
+  "module_id": "viam:robotiq-epick",
   "version": "latest"
 }
 ```
@@ -47,7 +47,7 @@ Add the **gripper component** with a frame parented to the arm. The `translation
 ```json
 {
   "name": "vacuum_gripper",
-  "model": "shrews-testing:robotiq:epick",
+  "model": "viam:robotiq:epick",
   "type": "gripper",
   "namespace": "rdk",
   "attributes": {
@@ -82,7 +82,7 @@ Add the **gripper component** with a frame parented to the arm. The `translation
 
 ## Simulated gripper (no hardware)
 
-The `shrews-testing:robotiq:simulated-epick-vacuum-gripper` model implements the same
+The `viam:robotiq:simulated-epick-vacuum-gripper` model implements the same
 gripper API **without any hardware or network connection** — useful for developing and
 testing motion plans and gripper-driven state machines (e.g. a palletizer's vacuum step)
 before deploying to a real robot. It reuses the real EPick's kinematic model and collision
@@ -97,7 +97,7 @@ Holding behavior is time-driven:
 ```json
 {
   "name": "vacuum_gripper",
-  "model": "shrews-testing:robotiq:simulated-epick-vacuum-gripper",
+  "model": "viam:robotiq:simulated-epick-vacuum-gripper",
   "type": "gripper",
   "namespace": "rdk",
   "attributes": {

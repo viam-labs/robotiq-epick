@@ -29,7 +29,7 @@ import (
 )
 
 // SimModel is the Viam model for the simulated EPick vacuum gripper.
-var SimModel = resource.NewModel("shrews-testing", "robotiq", "simulated-epick-vacuum-gripper")
+var SimModel = resource.NewModel("viam", "robotiq", "simulated-epick-vacuum-gripper")
 
 // defaultGrabDelayMs is the delay after Grab() before IsHoldingSomething()
 // reports true, simulating vacuum buildup. Adjustable via config or DoCommand.

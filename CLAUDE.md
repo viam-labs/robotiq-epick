@@ -3,7 +3,7 @@
 ## What this is
 
 A Viam module implementing `rdk:component:gripper` for the Robotiq EPick vacuum gripper.
-Published as `shrews-testing:robotiq:epick` (to be moved to `viam-labs` namespace).
+Published as `viam:robotiq:epick` (in the viam-dev org, namespace `viam`).
 
 ## Architecture
 
@@ -70,7 +70,7 @@ control flow. Zero shared code.
 
 ## Simulated model
 
-`shrews-testing:robotiq:simulated-epick-vacuum-gripper` (`epick/simulated.go`) implements the
+`viam:robotiq:simulated-epick-vacuum-gripper` (`epick/simulated.go`) implements the
 gripper API with no hardware/socket — for testing motion plans and gripper state machines.
 It reuses the embedded `epick_model.json` + STL, so kinematics and collision geometry match
 the real model. Holding is time-driven: `Grab()` records the grab time and
@@ -165,6 +165,6 @@ viam module build start \
 
 ## Future work
 
-- [ ] Move to viam-labs namespace in Viam registry
+- [x] Moved to the `viam` namespace (viam-dev org) in the Viam registry
 - [ ] Add unit tests with mock socket server
 - [ ] Support Get3DModels when gripper API adds it (feature requested)
