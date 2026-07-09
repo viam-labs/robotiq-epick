@@ -1,0 +1,13 @@
+# Mesh decimation toolchain for `make decimate`. Not a build or runtime dependency
+# of the module -- it only regenerates the committed STLs under epick/.
+#
+# fast_simplification is the backend trimesh.simplify_quadric_decimation calls.
+# scipy, rtree, and networkx are never imported directly, but trimesh needs them at
+# call time: proximity.closest_point (the Hausdorff check) requires scipy and rtree,
+# and mesh.split() reaches networkx through fill_holes.
+trimesh==4.12.2
+networkx==3.6
+numpy==2.5.1
+fast_simplification==0.1.13
+rtree==1.4.1
+scipy==1.18.0

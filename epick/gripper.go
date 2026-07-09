@@ -36,6 +36,18 @@ var epickModelJSON []byte
 //go:embed epick_simplified.stl
 var epickSTL []byte
 
+//go:embed epick_simplified_with_realsense.stl
+var epickRealsenseSTL []byte
+
+// meshSTL returns the visualization mesh for the given configuration. Both meshes
+// are compiled in; the flag selects which one is parsed.
+func meshSTL(includeRealsense bool) []byte {
+	if includeRealsense {
+		return epickRealsenseSTL
+	}
+	return epickSTL
+}
+
 // Model is the Viam model for the Robotiq EPick vacuum gripper.
 var Model = resource.NewModel("viam", "robotiq", "epick")
 
@@ -49,6 +61,12 @@ type Config struct {
 	MaxPressurePct int    `json:"max_pressure_pct,omitempty"`
 	MinPressurePct int    `json:"min_pressure_pct,omitempty"`
 	TimeoutMs      int    `json:"timeout_ms,omitempty"`
+
+	// IncludeRealsense renders the mesh with the RealSense camera and its bracket.
+	// Visualization only: collision geometry comes from epick_model.json and is
+	// unaffected. The camera contributes its own collision geometry through the
+	// camera component's frame.
+	IncludeRealsense bool `json:"include_realsense,omitempty"`
 }
 
 func (cfg *Config) Validate(path string) ([]string, []string, error) {
@@ -91,6 +109,7 @@ type epickGripper struct {
 	logger   logging.Logger
 	opMgr    *operation.SingleOperationManager
 	addr     string             // URCap socket address, for reconnects
+	stl      []byte             // visualization mesh, selected by include_realsense
 	requests chan socketRequest // all socket I/O funnels through here
 	quit     chan struct{}      // closed by Close to signal shutdown
 	done     chan struct{}      // closed when the I/O goroutine exits
@@ -125,6 +144,7 @@ func newEPickGripper(
 		logger:   logger,
 		opMgr:    operation.NewSingleOperationManager(),
 		addr:     addr,
+		stl:      meshSTL(cfg.IncludeRealsense),
 		requests: make(chan socketRequest),
 		quit:     make(chan struct{}),
 		done:     make(chan struct{}),
@@ -484,22 +504,30 @@ func (g *epickGripper) IsMoving(ctx context.Context) (bool, error) {
 	return g.opMgr.OpRunning(), nil
 }
 
-// Geometries returns the EPick's collision geometry as an STL mesh.
-// The mesh is positioned relative to the TCP origin (Z=0 at cup tips).
-// The STL is exported from Onshape with Z=0 at the flange, so we offset
-// by -196mm to place it correctly in the gripper frame.
-func (g *epickGripper) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
-	// Offset: STL has Z=0 at flange, but our frame origin is at TCP (Z=-196 from flange).
+// meshGeometry builds the EPick's visualization mesh from STL bytes.
+// The mesh is positioned relative to the TCP origin (Z=0 at cup tips). The STL is
+// exported from Onshape with Z=0 at the flange, so we offset by -196mm to place it
+// correctly in the gripper frame.
+//
+// This is not the collision geometry. The motion planner reads Kinematics(), which
+// returns the primitives in epick_model.json.
+func meshGeometry(stl []byte, label string) ([]spatialmath.Geometry, error) {
 	pose := spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: -196})
 	mesh, err := spatialmath.NewMeshFromProto(
 		pose,
-		&commonpb.Mesh{ContentType: "stl", Mesh: epickSTL},
-		g.Name().ShortName(),
+		&commonpb.Mesh{ContentType: "stl", Mesh: stl},
+		label,
 	)
 	if err != nil {
 		return nil, err
 	}
 	return []spatialmath.Geometry{mesh}, nil
+}
+
+// Geometries returns the EPick's visualization mesh. Polled on every frame update,
+// so it is a plain read of the mesh chosen at construction.
+func (g *epickGripper) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
+	return meshGeometry(g.stl, g.Name().ShortName())
 }
 
 // Kinematics returns the embedded kinematic model (collision geometry + TCP offset).

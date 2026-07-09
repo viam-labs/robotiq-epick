@@ -17,8 +17,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/golang/geo/r3"
-	commonpb "go.viam.com/api/common/v1"
 	"go.viam.com/rdk/components/gripper"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/operation"
@@ -41,6 +39,10 @@ type SimConfig struct {
 	// true. 0 uses defaultGrabDelayMs; set explicitly (including a small value)
 	// to simulate faster/slower vacuum buildup.
 	GrabDelayMs int `json:"grab_delay_ms,omitempty"`
+
+	// IncludeRealsense renders the mesh with the RealSense camera and its bracket,
+	// matching the real model's attribute. Visualization only.
+	IncludeRealsense bool `json:"include_realsense,omitempty"`
 }
 
 func (cfg *SimConfig) Validate(path string) ([]string, []string, error) {
@@ -61,6 +63,7 @@ type simGripper struct {
 	resource.AlwaysRebuild
 	logger logging.Logger
 	opMgr  *operation.SingleOperationManager
+	stl    []byte // visualization mesh, selected by include_realsense
 
 	mu        sync.Mutex
 	grabDelay time.Duration
@@ -88,6 +91,7 @@ func newSimGripper(
 		Named:     conf.ResourceName().AsNamed(),
 		logger:    logger,
 		opMgr:     operation.NewSingleOperationManager(),
+		stl:       meshSTL(cfg.IncludeRealsense),
 		grabDelay: time.Duration(delayMs) * time.Millisecond,
 	}
 	logger.CInfof(ctx, "simulated EPick gripper ready (grab delay %dms)", delayMs)
@@ -180,18 +184,9 @@ func (g *simGripper) IsMoving(ctx context.Context) (bool, error) {
 	return g.opMgr.OpRunning(), nil
 }
 
-// Geometries returns the EPick collision mesh, positioned like the real model.
+// Geometries returns the EPick visualization mesh, positioned like the real model.
 func (g *simGripper) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
-	pose := spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: -196})
-	mesh, err := spatialmath.NewMeshFromProto(
-		pose,
-		&commonpb.Mesh{ContentType: "stl", Mesh: epickSTL},
-		g.Name().ShortName(),
-	)
-	if err != nil {
-		return nil, err
-	}
-	return []spatialmath.Geometry{mesh}, nil
+	return meshGeometry(g.stl, g.Name().ShortName())
 }
 
 // Kinematics returns the embedded kinematic model (shared with the real EPick).

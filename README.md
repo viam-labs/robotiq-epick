@@ -79,6 +79,7 @@ Add the **gripper component** with a frame parented to the arm. The `translation
 | `max_pressure_pct` | int | No | `60` | Maximum vacuum level (20-100%), when mode is "advanced" |
 | `min_pressure_pct` | int | No | `40` | Minimum vacuum level (10-100%), when mode is "advanced" |
 | `timeout_ms` | int | No | `3000` | Grip timeout in ms, when mode is "advanced" |
+| `include_realsense` | bool | No | `false` | Render the mesh with the RealSense camera and bracket. Visualization only — collision geometry is unchanged. |
 
 ## Simulated gripper (no hardware)
 
@@ -116,6 +117,7 @@ Holding behavior is time-driven:
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `grab_delay_ms` | int | No | `1000` | Delay after `Grab()` before `IsHoldingSomething()` reports `true` (≥ 0). Omit or set `0` to use the default of `1000`. |
+| `include_realsense` | bool | No | `false` | Render the mesh with the RealSense camera and bracket. Visualization only. |
 
 The delay is also adjustable at runtime via `DoCommand`:
 
