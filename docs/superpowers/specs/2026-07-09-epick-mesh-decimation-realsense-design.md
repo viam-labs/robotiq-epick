@@ -50,12 +50,13 @@ real and simulated models. Decimate both STLs offline with a committed script.
 ### Rejected alternatives
 
 **Unify collision and visualization on the mesh.** Replace the primitives with the STL so the
-attribute drives both. This is the only design in which `include_realsense` affects motion
-planning. Rejected: it changes collision behavior for existing deployments (notably
-palletizing1), and a tighter collision hull is the kind of change that surfaces in production
-as unexplained motion differences. Deferred, not dismissed.
+attribute drives both. Rejected as incorrect, not merely risky: the mesh includes the suction
+cups, and collision geometry covering the cups would make the gripper unable to plan a pick
+(see "Why the cups are excluded" below).
 
-**Widen the collision box to cover the camera.** Rejected as out of scope for this change.
+**Widen the collision box to cover the camera.** Rejected: the camera already contributes its
+own collision geometry through the RealSense camera component's frame. Adding it to the
+gripper too would double-count the obstacle.
 
 **Runtime `ConservativeDecimate`.** RDK exposes `(*Mesh).ConservativeDecimate`
 (`spatialmath/mesh_decimation.go:15`), but it returns an *enclosing convex hull*, not a shape
@@ -65,17 +66,28 @@ visualization. It also would not shrink the binary.
 
 **Commit two model JSONs with base64 `mesh_data`.** Unreadable diffs, invites drift.
 
-## Known limitations (accepted, pre-existing)
+## Why the collision primitives look "wrong" (they are not)
 
-These are properties of the current collision model. This change neither introduces nor fixes
-them; they are recorded so they are not rediscovered as new bugs.
+The collision primitives deliberately do not match the mesh. Both discrepancies are load-bearing.
 
-1. **The planner cannot see the RealSense.** The camera reaches Y = -107mm; the collision box
-   stops at Y = -75mm. 32mm of camera is invisible to motion planning.
-2. **The planner cannot see the suction cups.** The box's top face is Z = -26mm; the cups
-   extend to Z = -10mm. A 16mm band at the working end of the gripper has hardware in it and
-   no collision geometry.
-3. **The collision box is a loose fit in X/Y.** ±115 × ±75 around a gripper that is ±104 × ±65.
+**The suction cups are excluded on purpose.** The box's top face is Z = -26mm; the cups extend
+to Z = -10mm. That 16mm band contains real hardware and no collision geometry — because the
+TCP sits at the cup tips, and picking an object up means driving the TCP into contact with it.
+Collision geometry covering the cups would make every grab approach a collision, and the
+planner would refuse to execute it. **Do not "fix" this.** It is why the gripper can pick
+anything up at all, and it is why the visualization mesh must never become the collision
+geometry.
+
+**The camera is excluded on purpose.** The RealSense reaches Y = -107mm while the collision
+box stops at Y = -75mm, but the camera is not missing from the frame system: the RealSense
+camera component contributes its own collision box through its own frame. The gripper must not
+duplicate it.
+
+The RealSense STL therefore has no collision role whatsoever. Its purpose is visual — it lets
+you confirm the camera's frame origin lands where the mesh shows the camera to be.
+
+One genuine looseness remains, recorded but not addressed here: the collision box is ±115 × ±75
+around a gripper that is ±104 × ±65, roughly 10mm of padding per side in X and Y.
 
 ## Design
 
@@ -158,5 +170,6 @@ Machines with a RealSense physically mounted (palletizing1) must set
 ## Documentation
 
 - `CLAUDE.md`: the STL-must-be-in-meters rule and the reason for it; the regeneration recipe;
-  the new attribute; the accepted limitations above.
+  the new attribute; and — most importantly — why the collision primitives exclude the suction
+  cups and the camera, so no future reader "corrects" them.
 - `README.md`: `include_realsense` in the config reference.
