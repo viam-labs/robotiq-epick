@@ -61,9 +61,9 @@ func init() {
 type simGripper struct {
 	resource.Named
 	resource.AlwaysRebuild
-	logger logging.Logger
-	opMgr  *operation.SingleOperationManager
-	stl    []byte // visualization mesh, selected by include_realsense
+	logger           logging.Logger
+	opMgr            *operation.SingleOperationManager
+	includeRealsense bool // draw the RealSense camera and bracket
 
 	mu        sync.Mutex
 	grabDelay time.Duration
@@ -88,11 +88,11 @@ func newSimGripper(
 	}
 
 	g := &simGripper{
-		Named:     conf.ResourceName().AsNamed(),
-		logger:    logger,
-		opMgr:     operation.NewSingleOperationManager(),
-		stl:       meshSTL(cfg.IncludeRealsense),
-		grabDelay: time.Duration(delayMs) * time.Millisecond,
+		Named:            conf.ResourceName().AsNamed(),
+		logger:           logger,
+		opMgr:            operation.NewSingleOperationManager(),
+		includeRealsense: cfg.IncludeRealsense,
+		grabDelay:        time.Duration(delayMs) * time.Millisecond,
 	}
 	logger.CInfof(ctx, "simulated EPick gripper ready (grab delay %dms)", delayMs)
 	return g, nil
@@ -184,9 +184,9 @@ func (g *simGripper) IsMoving(ctx context.Context) (bool, error) {
 	return g.opMgr.OpRunning(), nil
 }
 
-// Geometries returns the EPick visualization mesh, positioned like the real model.
+// Geometries returns the EPick drawn as primitives, matching the real model.
 func (g *simGripper) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
-	return meshGeometry(g.stl, g.Name().ShortName())
+	return visualGeometries(g.includeRealsense, g.Name().ShortName())
 }
 
 // Kinematics returns the embedded kinematic model (shared with the real EPick).

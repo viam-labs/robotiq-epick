@@ -64,24 +64,23 @@ control flow. Zero shared code.
 - `epick/gripper.go` — all gripper logic: ioLoop, Grab, Open, Kinematics, DoCommand
 - `epick/simulated.go` — simulated gripper model (no hardware), see below
 - `epick/simulated_test.go` — unit tests for the simulated model's hold-delay behavior
-- `epick/geometry_test.go` — unit tests for mesh selection, triangle budget, meters
+- `epick/geometry.go` — the primitive table: dimensions, part names, `visualGeometries`
+- `epick/geometry_test.go` — unit tests for the collision model, the render set, and the invariants tying them together
 - `epick/epick_model.json` — embedded kinematic model (collision geometry + TCP offset)
-- `epick/epick_simplified.stl` — embedded visualization mesh, no camera (default)
-- `epick/epick_simplified_with_realsense.stl` — embedded visualization mesh, with camera
-- `epick/meshes/*.stl` — full-resolution CAD exports; decimation sources, never embedded
+- `epick/meshes/*.stl` — full-resolution CAD exports; the source the primitives are fitted to, never embedded
 - `epick/registers.go` — EPick register constants (reference, not used at runtime)
-- `scripts/decimate_stl.py` — regenerates the embedded meshes (`make decimate`)
+- `scripts/fit_primitives.py` — re-derives the primitive table from CAD (`make fit-primitives`)
 - `meta.json` — Viam module manifest
 
 ## Simulated model
 
 `viam:robotiq:simulated-epick-vacuum-gripper` (`epick/simulated.go`) implements the
 gripper API with no hardware/socket — for testing motion plans and gripper state machines.
-It reuses the embedded `epick_model.json` + STL, so kinematics and collision geometry match
-the real model. Holding is time-driven: `Grab()` records the grab time and
+It reuses the embedded `epick_model.json` and the same `visualGeometries` builder, so
+kinematics and rendered geometry match the real model. Holding is time-driven: `Grab()` records the grab time and
 `IsHoldingSomething()` returns true once `grab_delay_ms` (default 1000, adjustable via config
 or `DoCommand({"set_grab_delay_ms": N})`) has elapsed; `Open()`/`Stop()` clear it immediately.
-Shares the package-level embedded `epickModelJSON`/`epickSTL` vars and the `meshGeometry`
+Shares the package-level embedded `epickModelJSON` var and the `visualGeometries`
 helper with `gripper.go`. It takes `include_realsense` too, so the sim renders the same
 gripper the hardware model would.
 
@@ -118,84 +117,91 @@ correctly appear at the cup tips.
 Embedded JSON parsed via `referenceframe.UnmarshalModelJSON` — this sets `OriginalFile`
 so it serializes correctly over gRPC (programmatic models via `ParseConfig` don't).
 
-Two collision geometries at negative Z from the TCP:
-- Capsule (body): centered at Z=-161mm, 68mm dia, 70mm tall
-- Box (bracket): centered at Z=-76mm, 230x150x100mm
+Six collision primitives at negative Z from the TCP, one per link (a link carries at
+most one geometry, so the parts are chained with zero translations between them):
 
-26mm clearance between collision boundary and TCP for approach.
+| Link | Shape | Dimensions | Center Z |
+|------|-------|-----------|----------|
+| `body` | cylinder | r 35.5, l 129 | -134.5 |
+| `plate` | box | 204.5 x 126.3 x 3.2 | -68.4 |
+| `cup-{xp,xn}-{yp,yn}` (x4) | cylinder | r 24.5, l 44 | -48 |
 
-### Collision is NOT the mesh — and the primitives look wrong on purpose
+`referenceframe` labels these `epick:body`, `epick:cup-xp-yp`, and so on
+(`referenceframe/model.go`), which is why `visualGeometries` qualifies its labels the
+same way — a part has one name whether it arrived as collision geometry or as a render.
+
+The body is a **cylinder**, which is the whole reason this model replaced its
+predecessor. A capsule cannot describe it: RDK requires a capsule's length >= 2*radius
+and always gives it domed ends, so the old capsule stopped at 70mm and covered barely
+half of a 129mm body. `spatialmath.Cylinder` (RDK >= v0.127.0) has no such constraint.
+
+**Cylinder collision is mesh-backed, not analytic.** `Cylinder.CollidesWith` delegates to
+a 16-segment tessellation — 64 triangles each, so five cylinders where there used to be
+one capsule and one box. `Mesh` carries a lazily-built BVH, a negative cache, and a
+witness-triangle fast path, and `NewCylinder` tessellates once in the constructor, so the
+cost is small. It is not zero. It buys a collision volume that no longer claims 100mm of
+solid where the hardware has a 3.2mm plate.
+
+### Collision is NOT the render — and the cups are short on purpose
 
 `Kinematics()` returns the primitives above. The frame system consumes only `Kinematics`
 (`robot/framesystem/framesystem.go`, the `InputEnabled` interface), so **the primitives are
-what the motion planner collision-checks against.** `Geometries()` returns the STL mesh and
-is polled by the app for rendering. No planner code path calls it.
+what the motion planner collision-checks against.** `Geometries()` returns the render set
+built by `visualGeometries` and is polled by the app for drawing. No planner code path
+calls it.
 
-Two apparent gaps in the collision model are deliberate. Do not "fix" either:
+The two sets are the same parts in the same places, with exactly two differences. Do not
+"fix" either:
 
-- **The suction cups are excluded.** The box's top face is Z=-26mm; the cups reach Z=-10mm.
-  The TCP sits at the cup tips, and picking an object up means driving the TCP into contact
-  with it. Collision geometry over the cups would make every grab approach a collision and
-  the planner would refuse to execute it. This is also why the mesh must never become the
-  collision geometry — the mesh includes the cups.
-- **The camera is excluded.** The RealSense reaches Y=-107mm; the box stops at Y=-75mm. The
-  camera is not missing from the frame system: the RealSense *camera component* contributes
-  its own collision geometry through its own frame. Duplicating it here would double-count
-  the obstacle.
+- **The cups are modeled 44mm long instead of 60mm.** Collision stops at Z=-26; the real
+  cups reach Z=-10. The TCP sits at the suction plane, and picking an object up means
+  driving the cups into contact with it. Collision geometry across that gap would make
+  every grab approach a collision and the planner would refuse to execute it.
+  `TestCollisionModelClearsTCP` holds the gap to exactly 26mm.
+- **The camera is excluded from collision.** The RealSense reaches Y=-107.2; the collision
+  model stops at Y=-65.15. The camera is not missing from the frame system: the RealSense
+  *camera component* contributes its own collision geometry through its own frame.
+  Duplicating it here would double-count the obstacle.
 
-## Visualization meshes
+`TestVisualAndCollisionAgree` enforces the rest — every part the planner collides against
+must also be drawn, in the same place, at the same size, with the cups the sole exception.
 
-`include_realsense` (both models, default `false`) selects which embedded STL `Geometries()`
-returns. Visualization only — `Kinematics()` is identical either way. Set it `true` on
-machines with the camera physically mounted; it exists to confirm the camera's frame origin
-lands where the mesh shows the camera to be.
+## Visualization
 
-Both STLs are compiled in via `go:embed` regardless of config; the flag picks which bytes get
-parsed. The chosen bytes are selected once in the constructor (both models are
-`resource.AlwaysRebuild`, so there is no `Reconfigure`) and `Geometries()` is a plain read —
-it is polled on every frame update.
+`Geometries()` returns the gripper drawn as primitives: the same body and plate the planner
+sees, plus the suction cups at their true 60mm length. `include_realsense` (both models,
+default `false`) adds two more boxes — the bracket (75 x 125.7 x 9.9 at Y=-42.1, Z=-160.6)
+and the camera body (81 x 20.1 x 27.3 at Y=-97.1, Z=-144.2). Six geometries plain, eight
+with the camera. `Kinematics()` is identical either way.
 
-### STLs must be in meters
+Set `include_realsense` true on machines with the camera physically mounted; it exists to
+confirm the camera's frame origin lands where the render shows the camera to be.
 
-`spatialmath.readSTLVertex` multiplies every vertex by 1000 with no unit check or scale
-factor. An STL exported in millimeters loads as a gripper 1000x too large. Everything *else*
-in Viam is millimeters (`epick_model.json` dimensions, the -196mm mesh offset, `translation.z`
-in the machine config) — only the mesh file is meters. `make decimate` and
-`TestMeshesAreInMeters` both assert this.
+Both models are `resource.AlwaysRebuild`, so there is no `Reconfigure` — the flag is read
+once in the constructor and `Geometries()` rebuilds a handful of primitives per poll.
 
-### Regenerating the meshes
+### Where the numbers come from
+
+The dimensions in `epick/geometry.go` are fitted to the full-resolution CAD exports in
+`epick/meshes/`. Splitting an export into connected components shows the gripper is six
+solids and every one is a clean box or a right circular cylinder — the cups sample at a
+constant 24.5mm radius end to end, so they are not even tapered. That is why primitives
+describe this gripper as well as a mesh does.
 
 ```bash
-make decimate    # provisions bin/mesh-venv, rewrites both embedded STLs
+make fit-primitives    # prints the table; changes no source file
 ```
 
-Sources are the full-resolution CAD exports in `epick/meshes/` (832 and 4,656 triangles).
-Outputs are 360 and 1,282 triangles. The run is deterministic — the Hausdorff probe is
-seeded, so re-running yields byte-identical files. To swap in a new CAD export, replace the
-file in `epick/meshes/` (in **meters**) and re-run.
+Two things the fit depends on, both learned from the decimation pipeline this replaced:
 
-`scripts/decimate_stl.py` decides face count from a shape-fidelity budget
-(`--max-deviation`, default 3.0mm); `--faces` is a hard cap that fails the run rather than
-degrading the mesh. Three constraints it encodes, each found the hard way:
+- **Weld vertices before splitting.** Binary STL stores three unshared vertices per facet,
+  so an unwelded mesh splits into one component per triangle.
+- **A tessellated cylinder's bounding box understates its radius.** The body's vertex radii
+  straddle the true value (35.396 to 35.603, mean 35.500) while its bbox half-width reads
+  35.448. Fit the radius from the wall vertices, not the extents.
 
-- **Weld vertices first.** Binary STL stores three unshared vertices per facet. An unwelded
-  mesh has no interior edges, and quadric decimation is edge-collapse — with nothing to
-  collapse it just deletes triangles. This silently truncated 57mm off the RealSense mesh.
-- **Decimate per component, never the whole mesh.** These STLs are 6–8 disconnected solids.
-  Given the whole mesh the simplifier spends the budget on the largest surface and deletes
-  small components outright — the suction cups vanish to buy triangles for the mounting plate.
-- **Never decimate an open shell.** The four suction cups are open shells. Quadric error sums
-  distances to the planes adjacent to a vertex, so boundary vertices look cheap to collapse;
-  decimating a cup flattens its rim (~31mm of error on a 60mm cup). Shells are preserved intact.
-
-The quality gate is a **symmetric** Hausdorff distance. A one-sided probe (sample the output,
-measure to the input) cannot detect deleted geometry — surviving triangles still lie on the
-original surface — and will happily report 0.10mm for a mesh missing a whole feature.
-
-Thin solids are the fragile ones: the 3mm mounting plate and 10mm camera bracket have little
-interior volume to constrain the error metric and self-intersect long before thicker parts do.
-The bracket also refuses to decimate below ~400 faces, where it shatters; `simplify_quadric_
-decimation(face_count=N)` is a request, not a guarantee.
+Exports are authored in **meters** and the fit script scales by 1000. This no longer matters
+at runtime — nothing parses an STL any more — but it matters when reading a new export.
 
 ## Hardware setup (tested)
 
@@ -237,7 +243,7 @@ make build                    # Build binary
 make module                   # Build tar.gz
 make lint                     # go mod tidy + go vet
 make test                     # go test -race ./...
-make decimate                 # Regenerate embedded STLs from epick/meshes/ sources
+make fit-primitives           # Re-derive the primitive table from epick/meshes/ CAD
 viam module upload \
   --version X.Y.Z \
   --platform linux/amd64 \
@@ -250,5 +256,6 @@ viam module build start \
 
 - [x] Moved to the `viam` namespace (viam-dev org) in the Viam registry
 - [x] Decimated the visualization meshes (10,348 -> 360 triangles) and added `include_realsense`
+- [x] Replaced the meshes entirely with primitives (6 boxes/cylinders) for both collision and render
 - [ ] Add unit tests with mock socket server
 - [ ] Support Get3DModels when gripper API adds it (feature requested)

@@ -79,7 +79,7 @@ Add the **gripper component** with a frame parented to the arm. The `translation
 | `max_pressure_pct` | int | No | `60` | Maximum vacuum level (20-100%), when mode is "advanced" |
 | `min_pressure_pct` | int | No | `40` | Minimum vacuum level (10-100%), when mode is "advanced" |
 | `timeout_ms` | int | No | `3000` | Grip timeout in ms, when mode is "advanced" |
-| `include_realsense` | bool | No | `false` | Render the mesh with the RealSense camera and bracket. Visualization only — collision geometry is unchanged. |
+| `include_realsense` | bool | No | `false` | Draw the RealSense camera and bracket. Visualization only — collision geometry is unchanged. |
 
 ## Simulated gripper (no hardware)
 
@@ -117,7 +117,7 @@ Holding behavior is time-driven:
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `grab_delay_ms` | int | No | `1000` | Delay after `Grab()` before `IsHoldingSomething()` reports `true` (≥ 0). Omit or set `0` to use the default of `1000`. |
-| `include_realsense` | bool | No | `false` | Render the mesh with the RealSense camera and bracket. Visualization only. |
+| `include_realsense` | bool | No | `false` | Draw the RealSense camera and bracket. Visualization only. |
 
 The delay is also adjustable at runtime via `DoCommand`:
 
@@ -132,37 +132,40 @@ The delay is also adjustable at runtime via `DoCommand`:
 
 The frame `translation.z: 196` places the gripper's origin at the **suction cup tips** (196mm from the flange). This is the TCP — the point the motion planner targets when you call `motion.Move`.
 
-The module returns collision geometry via `Kinematics()` positioned at **negative Z** from the TCP (back toward the flange):
+The gripper is modeled as six primitives — measured off the CAD, since every solid in it is a clean box or a right circular cylinder. `Kinematics()` returns them positioned at **negative Z** from the TCP (back toward the flange):
 
 ```
-         TCP (Z=0)           <-- gripper frame origin (cup tips)
-    ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄       motion planner targets poses here
-    │                    │
-    │    ~ clearance ~   │  Z=0 to Z=-26mm (no collision)
-    │                    │
-    │ ┌────────────────┐ │
-    │ │                │ │
-    │ │     Box        │ │  Z=-26 to Z=-126mm
-    │ │  230 x 150mm   │ │  Bracket + hoses (collision)
-    │ │                │ │
-    │ └────────────────┘ │
-    │                    │
-    │  ┌──────────────┐  │
-    │  │   Capsule     │  │  Z=-126 to Z=-196mm
-    │  │  68mm dia     │  │  EPick body (collision)
-    │  └──────────────┘  │
-    │                    │
-    ━━━━━━━━━━━━━━━━━━━━
+         TCP (Z=0)              <-- gripper frame origin (suction plane)
+    ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄     motion planner targets poses here
+                                Z=0 to Z=-26mm: approach gap, no collision
+    ┌──┐  ┌──┐  ┌──┐  ┌──┐
+    │  │  │  │  │  │  │  │      4 cup cylinders, r 24.5
+    │  │  │  │  │  │  │  │      Z=-26 to Z=-70mm (collision)
+    └──┘  └──┘  └──┘  └──┘      drawn full length, to Z=-10mm
+  ┌──────────────────────────┐
+  └──────────────────────────┘  plate box, 204.5 x 126.3 x 3.2mm
+
+         ┌──────────┐
+         │          │           body cylinder, 71mm dia
+         │          │           Z=-70 to Z=-199mm
+         └──────────┘
+    ━━━━━━━━━━━━━━━━━━━━━━━
     UR Arm Flange (Z=-196)
 ```
 
-The 26mm clearance between the collision boundary and the TCP ensures the planner allows the cups to approach surfaces. Other modules that attach geometry to this gripper frame (e.g. a held box) place it at the TCP origin — at the cup tips, where the box actually is.
+| Part | Shape | Dimensions | Center Z |
+|------|-------|-----------|----------|
+| Body | cylinder | r 35.5, l 129 | -134.5 |
+| Mounting plate | box | 204.5 x 126.3 x 3.2 | -68.4 |
+| Suction cup (x4) | cylinder | r 24.5, l 44 | -48 |
 
-**Dimensions based on actual measurements:**
-- EPick body: ~75mm diameter, 70mm tall
-- Widest point (bracket + hoses): 210mm x 130mm
-- Collision padding: +20mm on all sides
-- TCP: 196mm from flange (4-cup configuration, from manual Table 6-4)
+The suction cups are the one place the collision model deliberately understates the hardware. They are really 60mm long, reaching to Z=-10; the planner sees them at 44mm, stopping at Z=-26. Picking an object up means driving the cups into contact with it, so collision geometry across that gap would make every grab approach register as a collision. `Geometries()` draws them at their true length, so what you see in the app is the real shape.
+
+The RealSense camera is excluded from collision on purpose: the camera component supplies its own geometry through its own frame, and repeating it here would double-count the obstacle. Setting `include_realsense` adds it to the drawing only.
+
+Other modules that attach geometry to this gripper frame (e.g. a held box) place it at the TCP origin — at the cup tips, where the box actually is.
+
+**Dimensions are fitted to the CAD exports** in `epick/meshes/`. Re-derive them with `make fit-primitives` after replacing an export.
 
 ## API
 
