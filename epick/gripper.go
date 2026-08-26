@@ -19,8 +19,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/golang/geo/r3"
-	commonpb "go.viam.com/api/common/v1"
 	"go.viam.com/rdk/components/gripper"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/operation"
@@ -32,21 +30,6 @@ import (
 
 //go:embed epick_model.json
 var epickModelJSON []byte
-
-//go:embed epick_simplified.stl
-var epickSTL []byte
-
-//go:embed epick_simplified_with_realsense.stl
-var epickRealsenseSTL []byte
-
-// meshSTL returns the visualization mesh for the given configuration. Both meshes
-// are compiled in; the flag selects which one is parsed.
-func meshSTL(includeRealsense bool) []byte {
-	if includeRealsense {
-		return epickRealsenseSTL
-	}
-	return epickSTL
-}
 
 // Model is the Viam model for the Robotiq EPick vacuum gripper.
 var Model = resource.NewModel("viam", "robotiq", "epick")
@@ -105,14 +88,14 @@ type socketResponse struct {
 type epickGripper struct {
 	resource.Named
 	resource.AlwaysRebuild
-	conf     *Config
-	logger   logging.Logger
-	opMgr    *operation.SingleOperationManager
-	addr     string             // URCap socket address, for reconnects
-	stl      []byte             // visualization mesh, selected by include_realsense
-	requests chan socketRequest // all socket I/O funnels through here
-	quit     chan struct{}      // closed by Close to signal shutdown
-	done     chan struct{}      // closed when the I/O goroutine exits
+	conf             *Config
+	logger           logging.Logger
+	opMgr            *operation.SingleOperationManager
+	addr             string             // URCap socket address, for reconnects
+	includeRealsense bool               // draw the RealSense camera and bracket
+	requests         chan socketRequest // all socket I/O funnels through here
+	quit             chan struct{}      // closed by Close to signal shutdown
+	done             chan struct{}      // closed when the I/O goroutine exits
 }
 
 func newEPickGripper(
@@ -139,15 +122,15 @@ func newEPickGripper(
 	}
 
 	g := &epickGripper{
-		Named:    conf.ResourceName().AsNamed(),
-		conf:     cfg,
-		logger:   logger,
-		opMgr:    operation.NewSingleOperationManager(),
-		addr:     addr,
-		stl:      meshSTL(cfg.IncludeRealsense),
-		requests: make(chan socketRequest),
-		quit:     make(chan struct{}),
-		done:     make(chan struct{}),
+		Named:            conf.ResourceName().AsNamed(),
+		conf:             cfg,
+		logger:           logger,
+		opMgr:            operation.NewSingleOperationManager(),
+		addr:             addr,
+		includeRealsense: cfg.IncludeRealsense,
+		requests:         make(chan socketRequest),
+		quit:             make(chan struct{}),
+		done:             make(chan struct{}),
 	}
 
 	// Single goroutine owns the socket. All reads/writes go through it.
@@ -504,30 +487,10 @@ func (g *epickGripper) IsMoving(ctx context.Context) (bool, error) {
 	return g.opMgr.OpRunning(), nil
 }
 
-// meshGeometry builds the EPick's visualization mesh from STL bytes.
-// The mesh is positioned relative to the TCP origin (Z=0 at cup tips). The STL is
-// exported from Onshape with Z=0 at the flange, so we offset by -196mm to place it
-// correctly in the gripper frame.
-//
-// This is not the collision geometry. The motion planner reads Kinematics(), which
-// returns the primitives in epick_model.json.
-func meshGeometry(stl []byte, label string) ([]spatialmath.Geometry, error) {
-	pose := spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: -196})
-	mesh, err := spatialmath.NewMeshFromProto(
-		pose,
-		&commonpb.Mesh{ContentType: "stl", Mesh: stl},
-		label,
-	)
-	if err != nil {
-		return nil, err
-	}
-	return []spatialmath.Geometry{mesh}, nil
-}
-
-// Geometries returns the EPick's visualization mesh. Polled on every frame update,
-// so it is a plain read of the mesh chosen at construction.
+// Geometries returns the EPick drawn as primitives. Polled on every frame update,
+// so it rebuilds a handful of boxes and cylinders rather than reparsing a mesh.
 func (g *epickGripper) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
-	return meshGeometry(g.stl, g.Name().ShortName())
+	return visualGeometries(g.includeRealsense, g.Name().ShortName())
 }
 
 // Kinematics returns the embedded kinematic model (collision geometry + TCP offset).

@@ -7,7 +7,7 @@ GOARCH ?= $(shell go env GOARCH)
 MESH_VENV = bin/mesh-venv
 MESH_DIR = epick/meshes
 
-.PHONY: module build build-go test lint clean setup decimate
+.PHONY: module build build-go test lint clean setup fit-primitives
 
 setup:
 	apt-get update && apt-get install -y gcc-aarch64-linux-gnu gcc-x86-64-linux-gnu || true
@@ -29,15 +29,12 @@ lint:
 	go mod tidy
 	go vet ./...
 
-# Regenerate the embedded visualization meshes from the full-resolution CAD exports
-# in epick/meshes/. Deterministic: re-running produces byte-identical STLs. The
-# default mesh is capped at 500 triangles because Geometries() is polled by the app
-# on every frame update.
-decimate: $(MESH_VENV)
-	$(MESH_VENV)/bin/python scripts/decimate_stl.py \
-		$(MESH_DIR)/epick_full.stl epick/epick_simplified.stl --faces 500
-	$(MESH_VENV)/bin/python scripts/decimate_stl.py \
-		$(MESH_DIR)/epick_with_realsense_full.stl epick/epick_simplified_with_realsense.stl --faces 2000
+# Re-derive the primitive table in epick/geometry.go and epick/epick_model.json
+# from the full-resolution CAD exports in epick/meshes/. Read-only: it prints the
+# fit and changes no source file. Run it after replacing a CAD export, then update
+# the constants to match.
+fit-primitives: $(MESH_VENV)
+	$(MESH_VENV)/bin/python scripts/fit_primitives.py $(MESH_DIR)/epick_with_realsense_full.stl
 
 $(MESH_VENV): scripts/requirements.txt
 	python3 -m venv $(MESH_VENV)
