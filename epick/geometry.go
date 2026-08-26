@@ -15,17 +15,27 @@ import (
 // sample at a constant 24.5mm radius end to end, so they are not even tapered.
 // That is why primitives describe this gripper as well as a mesh does.
 const (
-	// flangeZ is where the body meets the arm's tool flange, 196mm behind the TCP.
-	flangeZ = -199.0
+	// flangePlaneZ is the arm's tool flange face, 196mm behind the TCP. The CAD
+	// origin sits here, which is why the fit script reports centers relative to it.
+	flangePlaneZ = -196.0
 
-	// The EPick body: a cylinder, which a capsule cannot describe. RDK requires
-	// a capsule's length >= 2*radius and always gives it domed ends, so the
-	// capsule this replaces had to stop at 70mm and covered barely half the body.
-	bodyRadius  = 35.5
-	bodyLength  = 129.0
-	bodyCenterZ = -134.5
+	// The EPick body. Its rear boss reaches 3mm past the flange face, into the
+	// space the arm's own end-effector geometry occupies, so the render draws the
+	// full 129mm while collision stops at the flange plane -- see
+	// bodyCollisionLength. A cylinder is what this model was waiting on: a capsule
+	// always domes its ends, so it cannot describe a flat-ended body at all.
+	bodyRadius        = 35.5
+	bodyVisualLength  = 129.0
+	bodyVisualCenterZ = -134.5
+	bodyRearZ         = -199.0
 
-	// The plate the cups bolt through. It is 3.2mm thick — the box this replaces
+	// Collision length: the body stopped at the flange face. Everything behind it
+	// is inside the arm, where only the arm can be, and the model this replaces
+	// ended there too -- so the rear collision boundary is unchanged.
+	bodyCollisionLength  = 126.0
+	bodyCollisionCenterZ = -133.0
+
+	// The plate the cups bolt through. It is 3.2mm thick -- the box this replaces
 	// claimed 100mm of solid here.
 	plateX       = 204.5
 	plateY       = 126.3
@@ -46,14 +56,18 @@ const (
 	// Collision length: the same cups stopped 26mm short of the TCP. Picking an
 	// object up means driving the cups into contact with it, so collision
 	// geometry across that gap makes the planner refuse every grab approach.
-	// This is the one place the collision model deliberately understates the
-	// hardware; TestCollisionModelClearsTCP holds it to exactly 26mm.
+	// TestCollisionModelClearsTCP holds the gap to exactly this.
 	cupCollisionLength  = 44.0
 	cupCollisionCenterZ = -48.0
+	tcpClearanceZ       = -26.0
 
-	// The RealSense bracket and camera body. Render-only: the camera component
-	// contributes its own collision geometry through its own frame, so repeating
-	// it here would double-count the obstacle.
+	// The widest the collision model reaches in -Y, set by the cups. Well short of
+	// the camera, which is excluded on purpose -- the camera component contributes
+	// its own collision geometry through its own frame, so repeating it here would
+	// double-count the obstacle.
+	collisionReachY = -(cupOffsetY + cupRadius)
+
+	// The RealSense bracket and camera body. Render-only, for the same reason.
 	bracketX       = 75.0
 	bracketY       = 125.7
 	bracketZ       = 9.9
@@ -65,6 +79,9 @@ const (
 	cameraZ       = 27.3
 	cameraCenterY = -97.1
 	cameraCenterZ = -144.2
+
+	// How far the camera reaches in -Y, from the CAD export.
+	cameraReachY = cameraCenterY - cameraY/2
 )
 
 // Part names. These double as the link ids in epick_model.json, so a part the
@@ -103,8 +120,8 @@ func partLabel(resourceName, part string) string {
 // which returns the primitives in epick_model.json.
 func visualGeometries(includeRealsense bool, resourceName string) ([]spatialmath.Geometry, error) {
 	body, err := spatialmath.NewCylinder(
-		spatialmath.NewPoseFromPoint(r3.Vector{Z: bodyCenterZ}),
-		bodyRadius, bodyLength, partLabel(resourceName, partBody))
+		spatialmath.NewPoseFromPoint(r3.Vector{Z: bodyVisualCenterZ}),
+		bodyRadius, bodyVisualLength, partLabel(resourceName, partBody))
 	if err != nil {
 		return nil, err
 	}

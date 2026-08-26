@@ -19,16 +19,6 @@ import (
 // eps is the tolerance for comparing dimensions authored to 0.1mm.
 const eps = 0.01
 
-// tcpClearance is the gap the collision model must leave between its topmost
-// face and the TCP at Z=0. Driving the cups into a surface is how a grab works,
-// so collision geometry over that gap makes the planner refuse every approach.
-const tcpClearance = 26.0
-
-// cameraReachY is how far the RealSense reaches in -Y, from the CAD export.
-// Collision geometry must stay clear of it: the camera component contributes
-// its own geometry through its own frame, and duplicating it double-counts.
-const cameraReachY = -107.2
-
 // bounds returns the exact axis-aligned min and max corners of a set of
 // geometries, in mm. Every part of this gripper is axis-aligned, so the AABB is
 // just the center plus a half-extent read off the geometry's config — exact,
@@ -117,19 +107,22 @@ func TestCollisionModelIsSixPrimitives(t *testing.T) {
 	test.That(t, boxes, test.ShouldEqual, 1)
 }
 
-// The body is a true cylinder, not the capsule it used to be approximated by.
-// A capsule cannot describe it: RDK requires length >= 2*radius and always
-// gives a capsule domed ends, so the old model covered barely half the body.
-func TestBodyIsCylinderMatchingCAD(t *testing.T) {
-	body, ok := byLabel(t, collisionGeometries(t))[qualified(partBody)]
+// The body is drawn as a true cylinder matching the CAD. A capsule cannot
+// describe it at all: a capsule is a segment swept by a sphere, so its ends are
+// always domed, never flat.
+func TestVisualBodyIsCylinderMatchingCAD(t *testing.T) {
+	visual, err := visualGeometries(false, "epick")
+	test.That(t, err, test.ShouldBeNil)
+
+	body, ok := byLabel(t, visual)[qualified(partBody)]
 	test.That(t, ok, test.ShouldBeTrue)
 
 	cyl, isCyl := body.(*spatialmath.Cylinder)
 	test.That(t, isCyl, test.ShouldBeTrue)
 
 	want, err := spatialmath.NewCylinder(
-		spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: bodyCenterZ}),
-		bodyRadius, bodyLength, qualified(partBody))
+		spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: bodyVisualCenterZ}),
+		bodyRadius, bodyVisualLength, qualified(partBody))
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, spatialmath.GeometriesAlmostEqual(cyl, want), test.ShouldBeTrue)
 }
@@ -139,22 +132,46 @@ func TestBodyIsCylinderMatchingCAD(t *testing.T) {
 // why the cups are modeled shorter than they really are.
 func TestCollisionModelClearsTCP(t *testing.T) {
 	_, maxC := bounds(t, collisionGeometries(t))
-	test.That(t, maxC.Z, test.ShouldAlmostEqual, -tcpClearance, eps)
+	test.That(t, maxC.Z, test.ShouldAlmostEqual, tcpClearanceZ, eps)
 }
 
 // The camera is excluded from collision on purpose: the RealSense component
 // supplies its own geometry through its own frame.
+//
+// Assert the collision model stops at its own -Y envelope, not merely short of
+// the camera. Thresholding at the camera's far edge would be vacuous: the camera
+// body's own minimum is Y=-107.15, inside cameraReachY, so adding it to the
+// collision model would not trip a `> cameraReachY` check.
 func TestCollisionModelExcludesCamera(t *testing.T) {
 	minC, _ := bounds(t, collisionGeometries(t))
-	test.That(t, minC.Y, test.ShouldBeGreaterThan, cameraReachY)
+	test.That(t, minC.Y, test.ShouldAlmostEqual, collisionReachY, eps)
+	test.That(t, collisionReachY, test.ShouldBeGreaterThan, cameraReachY)
+
+	// Neither camera part may appear under any name.
+	parts := byLabel(t, collisionGeometries(t))
+	for _, name := range []string{partCameraBracket, partCamera} {
+		_, present := parts[qualified(name)]
+		test.That(t, present, test.ShouldBeFalse)
+	}
 }
 
-// The whole collision model must sit at negative Z, between the flange and the
-// approach gap.
-func TestCollisionModelSpansFlangeToClearance(t *testing.T) {
+// The collision model stops at the arm's flange face. The body's rear boss
+// reaches 3mm further in reality, into the space the arm's own end-effector
+// geometry occupies; the model this replaces ended at the flange too, so the
+// rear collision boundary must not move.
+func TestCollisionModelStopsAtFlange(t *testing.T) {
 	minC, maxC := bounds(t, collisionGeometries(t))
-	test.That(t, minC.Z, test.ShouldAlmostEqual, flangeZ, eps)
+	test.That(t, minC.Z, test.ShouldAlmostEqual, flangePlaneZ, eps)
 	test.That(t, maxC.Z, test.ShouldBeLessThan, 0.0)
+}
+
+// The render draws the body's full length, past the flange face.
+func TestVisualBodyReachesPastFlange(t *testing.T) {
+	visual, err := visualGeometries(false, "epick")
+	test.That(t, err, test.ShouldBeNil)
+	minC, _ := bounds(t, visual)
+	test.That(t, minC.Z, test.ShouldAlmostEqual, bodyRearZ, eps)
+	test.That(t, bodyRearZ, test.ShouldBeLessThan, flangePlaneZ)
 }
 
 // The visualization is the true shape: the same body and plate the planner
@@ -192,31 +209,81 @@ func TestVisualGeometriesAddCamera(t *testing.T) {
 	test.That(t, minC.Y, test.ShouldAlmostEqual, cameraReachY, 0.5)
 }
 
-// Every part the planner collides against must also be drawn, and drawn in the
-// same place. The cups are the sole allowed difference: same axis and radius,
-// shorter for collision. This is what keeps the two sets from drifting apart.
+// Every part the planner collides against must also be drawn, at the same place
+// and the same width, and must be contained within what is drawn. Collision
+// geometry may only ever be shorter along Z, never wider and never longer --
+// otherwise the planner is avoiding something the hardware does not have.
+//
+// Two parts are deliberately shorter, and both are asserted exactly so that a
+// future "correction" to either one fails here:
+//   - the cups, clipped at the TCP approach gap
+//   - the body, clipped at the arm's flange face
 func TestVisualAndCollisionAgree(t *testing.T) {
 	visual, err := visualGeometries(false, "epick")
 	test.That(t, err, test.ShouldBeNil)
 	vis := byLabel(t, visual)
 
+	shorter := map[string]struct{ min, max float64 }{
+		qualified(partBody):    {flangePlaneZ, plateCenterZ - plateZ/2},
+		qualified("cup-xp-yp"): {plateCenterZ - plateZ/2, tcpClearanceZ},
+		qualified("cup-xp-yn"): {plateCenterZ - plateZ/2, tcpClearanceZ},
+		qualified("cup-xn-yp"): {plateCenterZ - plateZ/2, tcpClearanceZ},
+		qualified("cup-xn-yn"): {plateCenterZ - plateZ/2, tcpClearanceZ},
+	}
+
 	for _, c := range collisionGeometries(t) {
 		v, ok := vis[c.Label()]
 		test.That(t, ok, test.ShouldBeTrue)
 
-		if cup, isCup := c.(*spatialmath.Cylinder); isCup && c.Label() != qualified(partBody) {
-			// Same axis, same radius, longer in the render.
-			cMin, cMax := bounds(t, []spatialmath.Geometry{cup})
-			vMin, vMax := bounds(t, []spatialmath.Geometry{v})
-			test.That(t, cup.Pose().Point().X, test.ShouldAlmostEqual, v.Pose().Point().X, eps)
-			test.That(t, cup.Pose().Point().Y, test.ShouldAlmostEqual, v.Pose().Point().Y, eps)
-			test.That(t, cMax.X-cMin.X, test.ShouldAlmostEqual, vMax.X-vMin.X, eps)
-			test.That(t, cMin.Z, test.ShouldAlmostEqual, vMin.Z, eps)
-			test.That(t, cMax.Z, test.ShouldBeLessThan, vMax.Z)
+		cMin, cMax := bounds(t, []spatialmath.Geometry{c})
+		vMin, vMax := bounds(t, []spatialmath.Geometry{v})
+
+		// Same footprint in X and Y, exactly.
+		test.That(t, cMin.X, test.ShouldAlmostEqual, vMin.X, eps)
+		test.That(t, cMax.X, test.ShouldAlmostEqual, vMax.X, eps)
+		test.That(t, cMin.Y, test.ShouldAlmostEqual, vMin.Y, eps)
+		test.That(t, cMax.Y, test.ShouldAlmostEqual, vMax.Y, eps)
+
+		// Contained along Z.
+		test.That(t, cMin.Z, test.ShouldBeGreaterThanOrEqualTo, vMin.Z-eps)
+		test.That(t, cMax.Z, test.ShouldBeLessThanOrEqualTo, vMax.Z+eps)
+
+		if want, clipped := shorter[c.Label()]; clipped {
+			test.That(t, cMin.Z, test.ShouldAlmostEqual, want.min, eps)
+			test.That(t, cMax.Z, test.ShouldAlmostEqual, want.max, eps)
 			continue
 		}
+		// Everything else must match the render exactly.
 		test.That(t, spatialmath.GeometriesAlmostEqual(c, v), test.ShouldBeTrue)
 	}
+}
+
+// The collision cups must match the constants geometry.go documents them by, so
+// the JSON and the Go table cannot drift apart silently.
+func TestCollisionCupsMatchConstants(t *testing.T) {
+	parts := byLabel(t, collisionGeometries(t))
+	for _, c := range cupParts {
+		cup, ok := parts[qualified(c.name)].(*spatialmath.Cylinder)
+		test.That(t, ok, test.ShouldBeTrue)
+
+		want, err := spatialmath.NewCylinder(
+			spatialmath.NewPoseFromPoint(r3.Vector{X: c.x, Y: c.y, Z: cupCollisionCenterZ}),
+			cupRadius, cupCollisionLength, qualified(c.name))
+		test.That(t, err, test.ShouldBeNil)
+		test.That(t, spatialmath.GeometriesAlmostEqual(cup, want), test.ShouldBeTrue)
+	}
+}
+
+// The collision body must likewise match its constants.
+func TestCollisionBodyMatchesConstants(t *testing.T) {
+	body, ok := byLabel(t, collisionGeometries(t))[qualified(partBody)].(*spatialmath.Cylinder)
+	test.That(t, ok, test.ShouldBeTrue)
+
+	want, err := spatialmath.NewCylinder(
+		spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: bodyCollisionCenterZ}),
+		bodyRadius, bodyCollisionLength, qualified(partBody))
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, spatialmath.GeometriesAlmostEqual(body, want), test.ShouldBeTrue)
 }
 
 // include_realsense selects what renders. Collision geometry comes from

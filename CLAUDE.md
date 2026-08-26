@@ -122,7 +122,7 @@ most one geometry, so the parts are chained with zero translations between them)
 
 | Link | Shape | Dimensions | Center Z |
 |------|-------|-----------|----------|
-| `body` | cylinder | r 35.5, l 129 | -134.5 |
+| `body` | cylinder | r 35.5, l 126 | -133 |
 | `plate` | box | 204.5 x 126.3 x 3.2 | -68.4 |
 | `cup-{xp,xn}-{yp,yn}` (x4) | cylinder | r 24.5, l 44 | -48 |
 
@@ -131,9 +131,12 @@ most one geometry, so the parts are chained with zero translations between them)
 same way — a part has one name whether it arrived as collision geometry or as a render.
 
 The body is a **cylinder**, which is the whole reason this model replaced its
-predecessor. A capsule cannot describe it: RDK requires a capsule's length >= 2*radius
-and always gives it domed ends, so the old capsule stopped at 70mm and covered barely
-half of a 129mm body. `spatialmath.Cylinder` (RDK >= v0.127.0) has no such constraint.
+predecessor. A capsule cannot describe it at all: a capsule is a segment swept by a
+sphere, so its ends are always domed, never flat. (RDK also requires a capsule's
+length >= 2*radius, but that is not what constrained the old model -- at r=34 the
+floor is 68mm, so the 70mm capsule covering barely half a 129mm body was a choice,
+not a limit.) `spatialmath.Cylinder` (RDK >= v0.127.0) has flat ends and no length
+constraint at all.
 
 **Cylinder collision is mesh-backed, not analytic.** `Cylinder.CollidesWith` delegates to
 a 16-segment tessellation — 64 triangles each, so five cylinders where there used to be
@@ -158,13 +161,25 @@ The two sets are the same parts in the same places, with exactly two differences
   driving the cups into contact with it. Collision geometry across that gap would make
   every grab approach a collision and the planner would refuse to execute it.
   `TestCollisionModelClearsTCP` holds the gap to exactly 26mm.
+- **The body is modeled 126mm long instead of 129mm.** Collision stops at the flange
+  face, Z=-196. The body's rear boss really reaches Z=-199, 3mm past the flange and into
+  the space the arm's own end-effector geometry occupies -- the UR7e's `ee_link` is a
+  capsule of r=40, l=170 sitting right there. The capsule this replaced also ended at
+  -196, so keeping the rear boundary there means arm-vs-gripper collision behavior does
+  not move. `TestCollisionModelStopsAtFlange` holds it.
 - **The camera is excluded from collision.** The RealSense reaches Y=-107.2; the collision
   model stops at Y=-65.15. The camera is not missing from the frame system: the RealSense
   *camera component* contributes its own collision geometry through its own frame.
-  Duplicating it here would double-count the obstacle.
+  Duplicating it here would double-count the obstacle. Note that the guard for this must
+  assert the collision model stops at its **own** -Y envelope: a threshold set at the
+  camera's far edge is vacuous, since the camera body's own minimum (Y=-107.15) already
+  sits inside Y=-107.2.
 
-`TestVisualAndCollisionAgree` enforces the rest — every part the planner collides against
-must also be drawn, in the same place, at the same size, with the cups the sole exception.
+`TestVisualAndCollisionAgree` enforces the rest as a containment invariant: every part the
+planner collides against must also be drawn, with the same X/Y footprint, and its Z span
+must lie inside what is drawn. Collision geometry may only ever be shorter, never wider and
+never longer. The two clips above are asserted at their exact values, so "correcting"
+either one fails the test.
 
 ## Visualization
 
@@ -199,6 +214,10 @@ Two things the fit depends on, both learned from the decimation pipeline this re
 - **A tessellated cylinder's bounding box understates its radius.** The body's vertex radii
   straddle the true value (35.396 to 35.603, mean 35.500) while its bbox half-width reads
   35.448. Fit the radius from the wall vertices, not the extents.
+- **A square box passes a naive radius check trivially.** All eight of its vertices are
+  corners, so they sit at one radius -- sqrt(2) x the half-width. The fit rejects this by
+  requiring enough distinct circumference vertices, and by requiring the fitted radius to
+  fit inside the bounding box.
 
 Exports are authored in **meters** and the fit script scales by 1000. This no longer matters
 at runtime — nothing parses an STL any more — but it matters when reading a new export.

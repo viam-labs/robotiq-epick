@@ -147,19 +147,23 @@ The gripper is modeled as six primitives — measured off the CAD, since every s
 
          ┌──────────┐
          │          │           body cylinder, 71mm dia
-         │          │           Z=-70 to Z=-199mm
-         └──────────┘
+         │          │           collision Z=-70 to Z=-196mm
+         └──────────┘           drawn to Z=-199mm
     ━━━━━━━━━━━━━━━━━━━━━━━
     UR Arm Flange (Z=-196)
 ```
 
 | Part | Shape | Dimensions | Center Z |
 |------|-------|-----------|----------|
-| Body | cylinder | r 35.5, l 129 | -134.5 |
+| Body | cylinder | r 35.5, l 126 | -133 |
 | Mounting plate | box | 204.5 x 126.3 x 3.2 | -68.4 |
 | Suction cup (x4) | cylinder | r 24.5, l 44 | -48 |
 
-The suction cups are the one place the collision model deliberately understates the hardware. They are really 60mm long, reaching to Z=-10; the planner sees them at 44mm, stopping at Z=-26. Picking an object up means driving the cups into contact with it, so collision geometry across that gap would make every grab approach register as a collision. `Geometries()` draws them at their true length, so what you see in the app is the real shape.
+The collision model deliberately understates the hardware in two places, and `Geometries()` draws both at their true size, so what you see in the app is the real shape.
+
+**The suction cups** are really 60mm long, reaching to Z=-10; the planner sees them at 44mm, stopping at Z=-26. Picking an object up means driving the cups into contact with it, so collision geometry across that gap would make every grab approach register as a collision.
+
+**The body** really reaches Z=-199, 3mm past the flange face, into the space the arm's own end-effector geometry occupies; the planner sees it stop at Z=-196. The model this replaced ended there too, so arm-vs-gripper collision behavior is unchanged.
 
 The RealSense camera is excluded from collision on purpose: the camera component supplies its own geometry through its own frame, and repeating it here would double-count the obstacle. Setting `include_realsense` adds it to the drawing only.
 
