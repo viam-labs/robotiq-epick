@@ -122,28 +122,52 @@ most one geometry, so the parts are chained with zero translations between them)
 
 | Link | Shape | Dimensions | Center Z |
 |------|-------|-----------|----------|
-| `body` | cylinder | r 35.5, l 126 | -133 |
+| `body` | box | 71 x 71 x 126 | -133 |
 | `plate` | box | 204.5 x 126.3 x 3.2 | -68.4 |
-| `cup-{xp,xn}-{yp,yn}` (x4) | cylinder | r 24.5, l 44 | -48 |
+| `cup-{xp,xn}-{yp,yn}` (x4) | box | 49 x 49 x 44 | -48 |
 
 `referenceframe` labels these `epick:body`, `epick:cup-xp-yp`, and so on
 (`referenceframe/model.go`), which is why `visualGeometries` qualifies its labels the
 same way — a part has one name whether it arrived as collision geometry or as a render.
 
-The body is a **cylinder**, which is the whole reason this model replaced its
-predecessor. A capsule cannot describe it at all: a capsule is a segment swept by a
-sphere, so its ends are always domed, never flat. (RDK also requires a capsule's
-length >= 2*radius, but that is not what constrained the old model -- at r=34 the
-floor is 68mm, so the 70mm capsule covering barely half a 129mm body was a choice,
-not a limit.) `spatialmath.Cylinder` (RDK >= v0.127.0) has flat ends and no length
-constraint at all.
+### spatialmath.Cylinder can never leave this process
 
-**Cylinder collision is mesh-backed, not analytic.** `Cylinder.CollidesWith` delegates to
-a 16-segment tessellation — 64 triangles each, so five cylinders where there used to be
-one capsule and one box. `Mesh` carries a lazily-built BVH, a negative cache, and a
-witness-triangle fast path, and `NewCylinder` tessellates once in the constructor, so the
-cost is small. It is not zero. It buys a collision volume that no longer claims 100mm of
-solid where the hardware has a 3.2mm plate.
+**This is the most important thing in this file.** The wire protocol's geometry
+oneof is `Sphere`, `Box`, `Capsule`, `Mesh`, `Pointcloud`. There is no cylinder
+message, and `Cylinder.ToProtobuf()` does not return an error -- it panics:
+
+```
+panic("Cylinder.ToProtobuf: unimplemented -- no Cylinder message in commonpb")
+```
+
+`spatialmath.Cylinder` is an in-process collision primitive only. Version 2.2.0
+shipped with cylinders in both `Geometries()` and `epick_model.json` and was
+broken on arrival: the gripper's `GetGeometries` handler
+(`components/gripper/server.go`, via `referenceframe.NewGeometriesToProto`)
+panicked on five of six geometries, so the app's 3D scene rendered nothing.
+Cylinders in the model JSON are the same landmine one step removed, reachable
+through any RPC that ships a `GeometriesInFrame`
+(`referenceframe/transformable.go`).
+
+Every geometry test passed the whole time. None of them crossed the wire.
+`TestAllGeometriesSerialize` now does, and fails on exactly this.
+
+So:
+
+- **Round parts in `Geometries()` ship as tessellated meshes.** `roundPart()`
+  builds the cylinder for its shape, then returns `ToMesh()`. RDK converts every
+  mesh to PLY on the way out ("the visualizer expects all meshes to be in PLY
+  format"), which is the same representation the STL this replaced rendered
+  from -- so this is a known-good path, not a guess. ~10KB for all 8 geometries.
+- **Collision uses boxes.** A box shares the cylinder's bounding box and errs
+  outward. Do not "improve" this to a capsule: RDK capsule `length` is
+  tip-to-tip, so `r=35.5 l=126` leaves only 55mm at full radius and tapers to a
+  point across the 35.5mm where the body meets the plate, under-covering real
+  hardware. A capsule always *under*-approximates a flat-ended cylinder.
+
+The cost is the cups' round cross-section: a 49x49 box over-claims about 41% at
+the diagonals. That is the safe direction, and still far tighter than the single
+230x150x100 slab this model replaced.
 
 ### Collision is NOT the render — and the cups are short on purpose
 

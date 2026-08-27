@@ -132,7 +132,7 @@ The delay is also adjustable at runtime via `DoCommand`:
 
 The frame `translation.z: 196` places the gripper's origin at the **suction cup tips** (196mm from the flange). This is the TCP — the point the motion planner targets when you call `motion.Move`.
 
-The gripper is modeled as six primitives — measured off the CAD, since every solid in it is a clean box or a right circular cylinder. `Kinematics()` returns them positioned at **negative Z** from the TCP (back toward the flange):
+The gripper is modeled as six primitives — measured off the CAD, since every solid in it is a clean box or a right circular cylinder. Collision geometry squares the round parts off to their bounding boxes, because the Viam wire protocol has no cylinder type; `Geometries()` draws them round, as meshes. `Kinematics()` returns the collision boxes positioned at **negative Z** from the TCP (back toward the flange):
 
 ```
          TCP (Z=0)              <-- gripper frame origin (suction plane)
@@ -155,9 +155,9 @@ The gripper is modeled as six primitives — measured off the CAD, since every s
 
 | Part | Shape | Dimensions | Center Z |
 |------|-------|-----------|----------|
-| Body | cylinder | r 35.5, l 126 | -133 |
+| Body | box | 71 x 71 x 126 | -133 |
 | Mounting plate | box | 204.5 x 126.3 x 3.2 | -68.4 |
-| Suction cup (x4) | cylinder | r 24.5, l 44 | -48 |
+| Suction cup (x4) | box | 49 x 49 x 44 | -48 |
 
 The collision model deliberately understates the hardware in two places, and `Geometries()` draws both at their true size, so what you see in the app is the real shape.
 
