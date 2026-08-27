@@ -19,9 +19,10 @@
         }
       },
       "geometry": {
-        "type": "cylinder",
-        "r": 35.5,
-        "l": 126,
+        "type": "box",
+        "x": 71.0,
+        "y": 71.0,
+        "z": 126,
         "translation": {
           "x": 0,
           "y": 0,
@@ -76,9 +77,10 @@
         }
       },
       "geometry": {
-        "type": "cylinder",
-        "r": 24.5,
-        "l": 44,
+        "type": "box",
+        "x": 49.0,
+        "y": 49.0,
+        "z": 44,
         "translation": {
           "x": 79.75,
           "y": 40.65,
@@ -104,9 +106,10 @@
         }
       },
       "geometry": {
-        "type": "cylinder",
-        "r": 24.5,
-        "l": 44,
+        "type": "box",
+        "x": 49.0,
+        "y": 49.0,
+        "z": 44,
         "translation": {
           "x": 79.75,
           "y": -40.65,
@@ -132,9 +135,10 @@
         }
       },
       "geometry": {
-        "type": "cylinder",
-        "r": 24.5,
-        "l": 44,
+        "type": "box",
+        "x": 49.0,
+        "y": 49.0,
+        "z": 44,
         "translation": {
           "x": -79.75,
           "y": 40.65,
@@ -160,9 +164,10 @@
         }
       },
       "geometry": {
-        "type": "cylinder",
-        "r": 24.5,
-        "l": 44,
+        "type": "box",
+        "x": 49.0,
+        "y": 49.0,
+        "z": 44,
         "translation": {
           "x": -79.75,
           "y": -40.65,

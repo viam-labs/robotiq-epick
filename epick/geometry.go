@@ -5,6 +5,24 @@ import (
 	"go.viam.com/rdk/spatialmath"
 )
 
+// Nothing this file returns may be a spatialmath.Cylinder.
+//
+// The wire protocol's geometry oneof is Sphere, Box, Capsule, Mesh, Pointcloud
+// -- there is no cylinder message, and Cylinder.ToProtobuf() panics outright:
+//
+//	panic("Cylinder.ToProtobuf: unimplemented -- no Cylinder message in commonpb")
+//
+// So a cylinder cannot leave this process. Returning one from Geometries()
+// panics the gripper's GetGeometries handler (components/gripper/server.go, via
+// referenceframe.NewGeometriesToProto) and nothing renders; putting one in
+// epick_model.json is the same landmine one step removed, reachable through any
+// RPC that ships a GeometriesInFrame (referenceframe/transformable.go).
+//
+// Round parts therefore go over the wire as tessellated meshes, which is what
+// the app's visualizer wants anyway -- RDK converts every mesh to PLY on the way
+// out, so this is the same representation the STL this replaced was rendered
+// from. Flat parts stay boxes. TestAllGeometriesSerialize holds the line.
+
 // The EPick's shape, measured off the full-resolution CAD exports in epick/meshes/
 // and expressed in the gripper frame: Z=0 is the TCP at the suction plane, and
 // -Z runs back toward the arm flange. Re-derive these with `make fit-primitives`
@@ -22,8 +40,8 @@ const (
 	// The EPick body. Its rear boss reaches 3mm past the flange face, into the
 	// space the arm's own end-effector geometry occupies, so the render draws the
 	// full 129mm while collision stops at the flange plane -- see
-	// bodyCollisionLength. A cylinder is what this model was waiting on: a capsule
-	// always domes its ends, so it cannot describe a flat-ended body at all.
+	// bodyCollisionLength. The render draws it round; collision squares it off,
+	// because the wire has no cylinder (see the note at the top of this file).
 	bodyRadius        = 35.5
 	bodyVisualLength  = 129.0
 	bodyVisualCenterZ = -134.5
@@ -32,6 +50,12 @@ const (
 	// Collision length: the body stopped at the flange face. Everything behind it
 	// is inside the arm, where only the arm can be, and the model this replaces
 	// ended there too -- so the rear collision boundary is unchanged.
+	//
+	// Collision uses a box of side 2*bodyRadius, not a capsule. A capsule's
+	// length is tip-to-tip, so r=35.5 l=126 would leave only 55mm at full radius
+	// and taper to a point over the 35.5mm where the body meets the plate --
+	// under-covering real hardware. A box shares the cylinder's bounding box and
+	// errs outward instead.
 	bodyCollisionLength  = 126.0
 	bodyCollisionCenterZ = -133.0
 
@@ -112,6 +136,19 @@ func partLabel(resourceName, part string) string {
 	return resourceName + ":" + part
 }
 
+// roundPart builds a cylinder and hands back its tessellated mesh, which carries
+// the same shape in a form that can actually be serialized. See the note at the
+// top of this file for why the cylinder itself must not escape.
+func roundPart(pose spatialmath.Pose, radius, length float64, label string) (spatialmath.Geometry, error) {
+	cyl, err := spatialmath.NewCylinder(pose, radius, length, label)
+	if err != nil {
+		return nil, err
+	}
+	mesh := cyl.(*spatialmath.Cylinder).ToMesh()
+	mesh.SetLabel(label)
+	return mesh, nil
+}
+
 // visualGeometries returns the EPick drawn as primitives: the true shape of the
 // hardware, including the full length of the suction cups that the collision
 // model clips. includeRealsense adds the camera bracket and body.
@@ -119,7 +156,7 @@ func partLabel(resourceName, part string) string {
 // This is not the collision geometry. The frame system consumes Kinematics(),
 // which returns the primitives in epick_model.json.
 func visualGeometries(includeRealsense bool, resourceName string) ([]spatialmath.Geometry, error) {
-	body, err := spatialmath.NewCylinder(
+	body, err := roundPart(
 		spatialmath.NewPoseFromPoint(r3.Vector{Z: bodyVisualCenterZ}),
 		bodyRadius, bodyVisualLength, partLabel(resourceName, partBody))
 	if err != nil {
@@ -134,7 +171,7 @@ func visualGeometries(includeRealsense bool, resourceName string) ([]spatialmath
 	geoms := []spatialmath.Geometry{body, plate}
 
 	for _, c := range cupParts {
-		cup, err := spatialmath.NewCylinder(
+		cup, err := roundPart(
 			spatialmath.NewPoseFromPoint(r3.Vector{X: c.x, Y: c.y, Z: cupVisualCenterZ}),
 			cupRadius, cupVisualLength, partLabel(resourceName, c.name))
 		if err != nil {

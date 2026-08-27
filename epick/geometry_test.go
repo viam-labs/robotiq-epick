@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/golang/geo/r3"
+	commonpb "go.viam.com/api/common/v1"
 	"go.viam.com/rdk/components/gripper"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/operation"
@@ -37,8 +38,17 @@ func bounds(t *testing.T, geoms []spatialmath.Geometry) (minC, maxC r3.Vector) {
 		switch cfg.Type {
 		case spatialmath.BoxType:
 			half = r3.Vector{X: cfg.X / 2, Y: cfg.Y / 2, Z: cfg.Z / 2}
-		case spatialmath.CylinderType:
-			half = r3.Vector{X: cfg.R, Y: cfg.R, Z: cfg.L / 2}
+		case spatialmath.MeshType:
+			// Measure a mesh from its triangles; its config carries no extents.
+			m := g.(*spatialmath.Mesh)
+			var mx, my, mz float64
+			for _, tri := range m.Triangles() {
+				for _, p := range tri.Points() {
+					mx, my, mz = math.Max(mx, math.Abs(p.X)), math.Max(my, math.Abs(p.Y)), math.Max(mz, math.Abs(p.Z))
+				}
+			}
+			// Triangles are in the mesh's local frame; the pose carries the offset.
+			half = r3.Vector{X: mx, Y: my, Z: mz}
 		default:
 			t.Fatalf("unexpected geometry type %q for %q", cfg.Type, g.Label())
 		}
@@ -88,43 +98,46 @@ func newGeometrySimGripper(t *testing.T, includeRealsense bool) *simGripper {
 	}
 }
 
-// The collision model is the EPick reduced to primitives: one body cylinder,
-// one mounting plate, and four suction cups.
+// The collision model is the EPick reduced to primitives: the body, the mounting
+// plate, and four suction cups, each squared off to a box the wire can carry.
 func TestCollisionModelIsSixPrimitives(t *testing.T) {
 	geoms := collisionGeometries(t)
 	test.That(t, len(geoms), test.ShouldEqual, 6)
 
-	var cylinders, boxes int
+	// Every one must be a box: the wire has no cylinder, so collision geometry
+	// that is round in reality is squared off to its bounding box.
 	for _, g := range geoms {
-		switch g.(type) {
-		case *spatialmath.Cylinder:
-			cylinders++
-		default:
-			boxes++
-		}
+		cfg, err := spatialmath.NewGeometryConfig(g)
+		test.That(t, err, test.ShouldBeNil)
+		test.That(t, cfg.Type, test.ShouldEqual, spatialmath.BoxType)
 	}
-	test.That(t, cylinders, test.ShouldEqual, 5)
-	test.That(t, boxes, test.ShouldEqual, 1)
 }
 
-// The body is drawn as a true cylinder matching the CAD. A capsule cannot
-// describe it at all: a capsule is a segment swept by a sphere, so its ends are
-// always domed, never flat.
-func TestVisualBodyIsCylinderMatchingCAD(t *testing.T) {
+// The body is drawn round, at the CAD radius and length. It travels as a
+// tessellated mesh because a cylinder cannot be serialized at all.
+func TestVisualBodyIsRoundMatchingCAD(t *testing.T) {
 	visual, err := visualGeometries(false, "epick")
 	test.That(t, err, test.ShouldBeNil)
 
 	body, ok := byLabel(t, visual)[qualified(partBody)]
 	test.That(t, ok, test.ShouldBeTrue)
 
-	cyl, isCyl := body.(*spatialmath.Cylinder)
-	test.That(t, isCyl, test.ShouldBeTrue)
+	_, isMesh := body.(*spatialmath.Mesh)
+	test.That(t, isMesh, test.ShouldBeTrue)
 
-	want, err := spatialmath.NewCylinder(
-		spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: bodyVisualCenterZ}),
-		bodyRadius, bodyVisualLength, qualified(partBody))
-	test.That(t, err, test.ShouldBeNil)
-	test.That(t, spatialmath.GeometriesAlmostEqual(cyl, want), test.ShouldBeTrue)
+	minC, maxC := bounds(t, []spatialmath.Geometry{body})
+	test.That(t, maxC.X-minC.X, test.ShouldAlmostEqual, 2*bodyRadius, 0.2)
+	test.That(t, maxC.Y-minC.Y, test.ShouldAlmostEqual, 2*bodyRadius, 0.2)
+	test.That(t, maxC.Z-minC.Z, test.ShouldAlmostEqual, bodyVisualLength, eps)
+
+	// Round, not square: a box of the same bounding box would have every vertex
+	// at the corner radius. A tessellated circle's vertices sit on the circle.
+	for _, tri := range body.(*spatialmath.Mesh).Triangles() {
+		for _, pt := range tri.Points() {
+			// Local frame, so the axis is at x=y=0.
+			test.That(t, math.Hypot(pt.X, pt.Y), test.ShouldBeLessThanOrEqualTo, bodyRadius+eps)
+		}
+	}
 }
 
 // Nothing in the collision model may cross into the approach gap. This is the
@@ -184,13 +197,13 @@ func TestVisualGeometriesUseFullLengthCups(t *testing.T) {
 	_, maxC := bounds(t, visual)
 	test.That(t, maxC.Z, test.ShouldAlmostEqual, cupTipZ, eps)
 
-	cup, ok := byLabel(t, visual)[qualified("cup-xp-yp")].(*spatialmath.Cylinder)
+	cup, ok := byLabel(t, visual)[qualified("cup-xp-yp")]
 	test.That(t, ok, test.ShouldBeTrue)
-	want, err := spatialmath.NewCylinder(
-		spatialmath.NewPoseFromPoint(r3.Vector{X: cupOffsetX, Y: cupOffsetY, Z: cupVisualCenterZ}),
-		cupRadius, cupVisualLength, qualified("cup-xp-yp"))
-	test.That(t, err, test.ShouldBeNil)
-	test.That(t, spatialmath.GeometriesAlmostEqual(cup, want), test.ShouldBeTrue)
+	cMin, cMax := bounds(t, []spatialmath.Geometry{cup})
+	test.That(t, cMax.X-cMin.X, test.ShouldAlmostEqual, 2*cupRadius, 0.2)
+	test.That(t, cMax.Z-cMin.Z, test.ShouldAlmostEqual, cupVisualLength, eps)
+	test.That(t, cup.Pose().Point().X, test.ShouldAlmostEqual, cupOffsetX, eps)
+	test.That(t, cup.Pose().Point().Y, test.ShouldAlmostEqual, cupOffsetY, eps)
 }
 
 // include_realsense adds the bracket and camera body to the render only.
@@ -238,11 +251,13 @@ func TestVisualAndCollisionAgree(t *testing.T) {
 		cMin, cMax := bounds(t, []spatialmath.Geometry{c})
 		vMin, vMax := bounds(t, []spatialmath.Geometry{v})
 
-		// Same footprint in X and Y, exactly.
-		test.That(t, cMin.X, test.ShouldAlmostEqual, vMin.X, eps)
-		test.That(t, cMax.X, test.ShouldAlmostEqual, vMax.X, eps)
-		test.That(t, cMin.Y, test.ShouldAlmostEqual, vMin.Y, eps)
-		test.That(t, cMax.Y, test.ShouldAlmostEqual, vMax.Y, eps)
+		// Same footprint in X and Y. Collision squares off round parts, so the
+		// bounding boxes match even though the cross-sections differ; the box
+		// corners over-claim, which is the safe direction.
+		test.That(t, cMin.X, test.ShouldAlmostEqual, vMin.X, 0.2)
+		test.That(t, cMax.X, test.ShouldAlmostEqual, vMax.X, 0.2)
+		test.That(t, cMin.Y, test.ShouldAlmostEqual, vMin.Y, 0.2)
+		test.That(t, cMax.Y, test.ShouldAlmostEqual, vMax.Y, 0.2)
 
 		// Contained along Z.
 		test.That(t, cMin.Z, test.ShouldBeGreaterThanOrEqualTo, vMin.Z-eps)
@@ -263,12 +278,12 @@ func TestVisualAndCollisionAgree(t *testing.T) {
 func TestCollisionCupsMatchConstants(t *testing.T) {
 	parts := byLabel(t, collisionGeometries(t))
 	for _, c := range cupParts {
-		cup, ok := parts[qualified(c.name)].(*spatialmath.Cylinder)
+		cup, ok := parts[qualified(c.name)]
 		test.That(t, ok, test.ShouldBeTrue)
 
-		want, err := spatialmath.NewCylinder(
+		want, err := spatialmath.NewBox(
 			spatialmath.NewPoseFromPoint(r3.Vector{X: c.x, Y: c.y, Z: cupCollisionCenterZ}),
-			cupRadius, cupCollisionLength, qualified(c.name))
+			r3.Vector{X: 2 * cupRadius, Y: 2 * cupRadius, Z: cupCollisionLength}, qualified(c.name))
 		test.That(t, err, test.ShouldBeNil)
 		test.That(t, spatialmath.GeometriesAlmostEqual(cup, want), test.ShouldBeTrue)
 	}
@@ -276,12 +291,12 @@ func TestCollisionCupsMatchConstants(t *testing.T) {
 
 // The collision body must likewise match its constants.
 func TestCollisionBodyMatchesConstants(t *testing.T) {
-	body, ok := byLabel(t, collisionGeometries(t))[qualified(partBody)].(*spatialmath.Cylinder)
+	body, ok := byLabel(t, collisionGeometries(t))[qualified(partBody)]
 	test.That(t, ok, test.ShouldBeTrue)
 
-	want, err := spatialmath.NewCylinder(
+	want, err := spatialmath.NewBox(
 		spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: bodyCollisionCenterZ}),
-		bodyRadius, bodyCollisionLength, qualified(partBody))
+		r3.Vector{X: 2 * bodyRadius, Y: 2 * bodyRadius, Z: bodyCollisionLength}, qualified(partBody))
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, spatialmath.GeometriesAlmostEqual(body, want), test.ShouldBeTrue)
 }
@@ -349,7 +364,76 @@ func TestSimGripperGeometriesMatchRealModel(t *testing.T) {
 		test.That(t, len(simGeoms), test.ShouldEqual, len(want))
 
 		for i := range want {
-			test.That(t, spatialmath.GeometriesAlmostEqual(simGeoms[i], want[i]), test.ShouldBeTrue)
+			test.That(t, simGeoms[i].Label(), test.ShouldEqual, want[i].Label())
+			sMin, sMax := bounds(t, []spatialmath.Geometry{simGeoms[i]})
+			wMin, wMax := bounds(t, []spatialmath.Geometry{want[i]})
+			test.That(t, sMin, test.ShouldResemble, wMin)
+			test.That(t, sMax, test.ShouldResemble, wMax)
 		}
 	}
+}
+
+// Every geometry this module hands out must survive protobuf serialization.
+//
+// This is the test whose absence shipped a broken 2.2.0. spatialmath.Cylinder
+// has no message in commonpb -- the wire's geometry oneof is Sphere, Box,
+// Capsule, Mesh, Pointcloud -- and Cylinder.ToProtobuf() panics rather than
+// erroring. Returning one from Geometries() panicked the gripper's
+// GetGeometries handler, so the app's 3D scene drew nothing at all. Every
+// geometry test in this file passed the whole time, because none of them
+// crossed the wire.
+func TestAllGeometriesSerialize(t *testing.T) {
+	check := func(t *testing.T, source string, geoms []spatialmath.Geometry) {
+		t.Helper()
+		test.That(t, len(geoms), test.ShouldBeGreaterThan, 0)
+		for _, g := range geoms {
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Errorf("%s: %s panicked on ToProtobuf: %v", source, g.Label(), r)
+					}
+				}()
+				pb := g.ToProtobuf()
+				test.That(t, pb, test.ShouldNotBeNil)
+				test.That(t, pb.GetLabel(), test.ShouldEqual, g.Label())
+				test.That(t, pb.GetCenter(), test.ShouldNotBeNil)
+
+				// The oneof must actually be populated with a type the app knows.
+				switch pb.GetGeometryType().(type) {
+				case *commonpb.Geometry_Box, *commonpb.Geometry_Sphere,
+					*commonpb.Geometry_Capsule, *commonpb.Geometry_Mesh:
+				default:
+					t.Errorf("%s: %s serialized to unrenderable type %T",
+						source, g.Label(), pb.GetGeometryType())
+				}
+			}()
+		}
+	}
+
+	for _, includeRealsense := range []bool{false, true} {
+		geoms, err := visualGeometries(includeRealsense, "epick")
+		test.That(t, err, test.ShouldBeNil)
+		check(t, "Geometries()", geoms)
+	}
+	check(t, "Kinematics()", collisionGeometries(t))
+}
+
+// RDK converts every mesh to PLY on the way out ("the visualizer expects all
+// meshes to be in PLY format"), which is the same representation the STL this
+// replaced was rendered from. Assert the round parts really do carry mesh data.
+func TestRoundPartsShipRenderableMeshData(t *testing.T) {
+	visual, err := visualGeometries(false, "epick")
+	test.That(t, err, test.ShouldBeNil)
+
+	var meshes int
+	for _, g := range visual {
+		pb := g.ToProtobuf()
+		if m, ok := pb.GetGeometryType().(*commonpb.Geometry_Mesh); ok {
+			meshes++
+			test.That(t, m.Mesh.GetContentType(), test.ShouldEqual, "ply")
+			test.That(t, len(m.Mesh.GetMesh()), test.ShouldBeGreaterThan, 0)
+		}
+	}
+	// Body plus four cups.
+	test.That(t, meshes, test.ShouldEqual, 5)
 }
