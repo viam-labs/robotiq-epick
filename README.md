@@ -159,7 +159,7 @@ The gripper is modeled as six primitives — measured off the CAD, since every s
 | Mounting plate | box | 204.5 x 126.3 x 3.2 | -68.4 |
 | Suction cup (x4) | box | 49 x 49 x 44 | -48 |
 
-The collision model deliberately understates the hardware in two places, and `Geometries()` draws both at their true size, so what you see in the app is the real shape.
+The collision model deliberately understates the hardware in two places. `Geometries()` reports both at their true size over `GetGeometries`; note that the app's 3D Scene draws the collision model rather than that render set, so what you see there is the squared-off boxes below.
 
 **The suction cups** are really 60mm long, reaching to Z=-10; the planner sees them at 44mm, stopping at Z=-26. Picking an object up means driving the cups into contact with it, so collision geometry across that gap would make every grab approach register as a collision.
 

@@ -488,7 +488,7 @@ func (g *epickGripper) IsMoving(ctx context.Context) (bool, error) {
 }
 
 // Geometries returns the EPick drawn as primitives. Polled on every frame update,
-// so it rebuilds a handful of boxes and cylinders rather than reparsing a mesh.
+// so it rebuilds a handful of boxes and tessellations rather than reparsing an STL.
 func (g *epickGripper) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
 	return visualGeometries(g.includeRealsense, g.Name().ShortName())
 }

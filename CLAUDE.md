@@ -174,8 +174,14 @@ the diagonals. That is the safe direction, and still far tighter than the single
 `Kinematics()` returns the primitives above. The frame system consumes only `Kinematics`
 (`robot/framesystem/framesystem.go`, the `InputEnabled` interface), so **the primitives are
 what the motion planner collision-checks against.** `Geometries()` returns the render set
-built by `visualGeometries` and is polled by the app for drawing. No planner code path
-calls it.
+built by `visualGeometries`, served over `GetGeometries`. No planner code path calls it.
+
+**What the app's 3D Scene draws is `Kinematics()`, not `Geometries()`.** Observed directly
+on a live machine: the scene tree is `epick` -> `epick:body` -> `epick:plate` -> cups,
+mirroring the link chain in `epick_model.json`. So the scene shows the collision boxes --
+squared-off cups, clipped at Z=-26 -- not the round full-length render. An earlier version
+of this file claimed the app polled `Geometries()` for drawing; that was wrong, and
+believing it is part of how 2.2.0 shipped broken.
 
 The two sets are the same parts in the same places, with exactly two differences. Do not
 "fix" either:

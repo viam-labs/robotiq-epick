@@ -98,8 +98,8 @@ func newGeometrySimGripper(t *testing.T, includeRealsense bool) *simGripper {
 	}
 }
 
-// The collision model is the EPick reduced to primitives: one body cylinder,
-// one mounting plate, and four suction cups.
+// The collision model is the EPick reduced to primitives: the body, the mounting
+// plate, and four suction cups, each squared off to a box the wire can carry.
 func TestCollisionModelIsSixPrimitives(t *testing.T) {
 	geoms := collisionGeometries(t)
 	test.That(t, len(geoms), test.ShouldEqual, 6)
@@ -264,7 +264,6 @@ func TestVisualAndCollisionAgree(t *testing.T) {
 		test.That(t, cMax.Z, test.ShouldBeLessThanOrEqualTo, vMax.Z+eps)
 
 		if want, clipped := shorter[c.Label()]; clipped {
-			_ = want
 			test.That(t, cMin.Z, test.ShouldAlmostEqual, want.min, eps)
 			test.That(t, cMax.Z, test.ShouldAlmostEqual, want.max, eps)
 			continue

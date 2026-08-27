@@ -40,8 +40,8 @@ const (
 	// The EPick body. Its rear boss reaches 3mm past the flange face, into the
 	// space the arm's own end-effector geometry occupies, so the render draws the
 	// full 129mm while collision stops at the flange plane -- see
-	// bodyCollisionLength. A cylinder is what this model was waiting on: a capsule
-	// always domes its ends, so it cannot describe a flat-ended body at all.
+	// bodyCollisionLength. The render draws it round; collision squares it off,
+	// because the wire has no cylinder (see the note at the top of this file).
 	bodyRadius        = 35.5
 	bodyVisualLength  = 129.0
 	bodyVisualCenterZ = -134.5
