@@ -46,16 +46,16 @@ const (
 
 // Input byte 0: GRIPPER STATUS register bit positions and masks.
 const (
-	bitGACT    = 0 // Activation echo (1 bit)
-	bitGMOD    = 1 // Mode echo (2 bits)
-	bitGGTO    = 3 // Regulate echo (1 bit)
-	bitGSTA    = 4 // Activation status (2 bits)
-	bitGOBJ    = 6 // Object detection (2 bits)
-	maskGACT   = 0x01
-	maskGMOD   = 0x06
-	maskGGTO   = 0x08
-	maskGSTA   = 0x30
-	maskGOBJ   = 0xC0
+	bitGACT  = 0 // Activation echo (1 bit)
+	bitGMOD  = 1 // Mode echo (2 bits)
+	bitGGTO  = 3 // Regulate echo (1 bit)
+	bitGSTA  = 4 // Activation status (2 bits)
+	bitGOBJ  = 6 // Object detection (2 bits)
+	maskGACT = 0x01
+	maskGMOD = 0x06
+	maskGGTO = 0x08
+	maskGSTA = 0x30
+	maskGOBJ = 0xC0
 )
 
 // gSTA values (activation status).
@@ -66,10 +66,10 @@ const (
 
 // gOBJ values (object detection status).
 const (
-	ObjUnknown        byte = 0x00 // Regulating towards requested vacuum
-	ObjDetectedMin    byte = 0x01 // Object detected, minimum vacuum reached
-	ObjDetectedMax    byte = 0x02 // Object detected, maximum vacuum reached
-	ObjNoObject       byte = 0x03 // No object, dropped or timeout
+	ObjUnknown     byte = 0x00 // Regulating towards requested vacuum
+	ObjDetectedMin byte = 0x01 // Object detected, minimum vacuum reached
+	ObjDetectedMax byte = 0x02 // Object detected, maximum vacuum reached
+	ObjNoObject    byte = 0x03 // No object, dropped or timeout
 )
 
 // Input byte 1: GRIPPER STATUS EXTENSION bit positions.
@@ -80,10 +80,10 @@ const (
 
 // gVAS values (vacuum actuator status).
 const (
-	VasStandby         byte = 0x00 // Vacuum generator OFF, valves deasserted
-	VasGripping        byte = 0x01 // Vacuum generator ON
-	VasPassiveRelease  byte = 0x02 // Releasing to ambient pressure
-	VasActiveRelease   byte = 0x03 // Releasing with positive pressure
+	VasStandby        byte = 0x00 // Vacuum generator OFF, valves deasserted
+	VasGripping       byte = 0x01 // Vacuum generator ON
+	VasPassiveRelease byte = 0x02 // Releasing to ambient pressure
+	VasActiveRelease  byte = 0x03 // Releasing with positive pressure
 )
 
 // Input byte 2: FAULT STATUS register.
@@ -94,16 +94,16 @@ const (
 
 // gFLT fault code values.
 const (
-	FaultNone              byte = 0x0 // No fault
-	FaultActionDelayed     byte = 0x5 // Priority: action delayed
-	FaultPorousMaterial    byte = 0x3 // Priority: very porous material
-	FaultGripTimeout       byte = 0x6 // Priority: gripping timeout, re-assert rGTO
-	FaultActivationNotSet  byte = 0x7 // Priority: rACT must be set first
-	FaultOverTemp          byte = 0x8 // Minor: max temp exceeded
-	FaultNoComm            byte = 0x9 // Minor: no communication for 1 second
-	FaultUnderVoltage      byte = 0xA // Major: under minimum voltage
-	FaultAutoRelease       byte = 0xB // Major: auto release in progress
-	FaultInternalFault     byte = 0xC // Major: internal fault
+	FaultNone                byte = 0x0 // No fault
+	FaultActionDelayed       byte = 0x5 // Priority: action delayed
+	FaultPorousMaterial      byte = 0x3 // Priority: very porous material
+	FaultGripTimeout         byte = 0x6 // Priority: gripping timeout, re-assert rGTO
+	FaultActivationNotSet    byte = 0x7 // Priority: rACT must be set first
+	FaultOverTemp            byte = 0x8 // Minor: max temp exceeded
+	FaultNoComm              byte = 0x9 // Minor: no communication for 1 second
+	FaultUnderVoltage        byte = 0xA // Major: under minimum voltage
+	FaultAutoRelease         byte = 0xB // Major: auto release in progress
+	FaultInternalFault       byte = 0xC // Major: internal fault
 	FaultAutoReleaseComplete byte = 0xF // Major: auto release completed
 )
 
@@ -128,12 +128,12 @@ func (o *outputRegisters) toRegisters() []uint16 {
 
 // inputRegisters holds the 6 input bytes unpacked from 3 Modbus registers.
 type inputRegisters struct {
-	gripperStatus    byte // Byte 0: gACT, gMOD, gGTO, gSTA, gOBJ
-	statusExtension  byte // Byte 1: gVAS
-	faultStatus      byte // Byte 2: gFLT, kFLT
-	maxPressureEcho  byte // Byte 3: gPR
-	actualPressure   byte // Byte 4: gPO
-	reserved         byte // Byte 5: reserved
+	gripperStatus   byte // Byte 0: gACT, gMOD, gGTO, gSTA, gOBJ
+	statusExtension byte // Byte 1: gVAS
+	faultStatus     byte // Byte 2: gFLT, kFLT
+	maxPressureEcho byte // Byte 3: gPR
+	actualPressure  byte // Byte 4: gPO
+	reserved        byte // Byte 5: reserved
 }
 
 // fromRegisters unpacks 3 uint16 Modbus registers into input bytes.
