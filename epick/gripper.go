@@ -157,7 +157,7 @@ func (g *epickGripper) ioLoop(conn net.Conn) {
 	defer close(g.done)
 	defer func() {
 		if conn != nil {
-			conn.Close()
+			_ = conn.Close()
 		}
 	}()
 
@@ -199,15 +199,20 @@ func (g *epickGripper) ioLoop(conn net.Conn) {
 			}
 			if _, err := conn.Write([]byte(msg)); err != nil {
 				g.logger.Warnf("socket write failed: %v; reconnecting", err)
-				conn.Close()
+				_ = conn.Close()
 				conn = nil
 				continue
 			}
-			conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+				g.logger.Warnf("socket set read deadline failed: %v; reconnecting", err)
+				_ = conn.Close()
+				conn = nil
+				continue
+			}
 			n, err := conn.Read(buf)
 			if err != nil {
 				g.logger.Warnf("socket read failed: %v; reconnecting", err)
-				conn.Close()
+				_ = conn.Close()
 				conn = nil
 				continue
 			}
